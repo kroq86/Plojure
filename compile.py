@@ -18,7 +18,8 @@ def compile_program(program):
             "dump":
             lambda:
             (asm.write("    mov rdi,printf_format\n"),
-             asm.write("    mov rsi,rax\n"), asm.write("    call printf\n"))
+             asm.write("    mov rsi,rax\n"), asm.write("    xor rax,rax\n"),
+             asm.write("    call printf\n"))
         }
         for _ in program:
             dct[str(_[0][1])]()
