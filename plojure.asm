@@ -2,8 +2,17 @@ extern printf
 global main
 section .text
 main:
+    push 23
     push 22
-    push 11
+    pop rax
+    pop rbx
+    add rax, rbx
+    push rax
+    mov rdi,printf_format
+    mov rsi,rax
+    call printf
+    push 23
+    push 21
     pop rax
     pop rbx
     sub rbx, rax

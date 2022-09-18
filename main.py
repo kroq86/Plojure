@@ -32,5 +32,22 @@ def run_program(program):
         dct[str(_[0][1])]()
 
 
-run_program([mov(22), mov(11), pls(), dmp()])
-compile_program([mov(22), mov(11), mns(), dmp()])
+def parse_word(w):
+    if w == "+":
+        return pls()
+    elif w == "-":
+        return mns()
+    elif w == "=":
+        return dmp()
+    else:
+        return mov(int(w))
+
+
+def parser():
+    with open("program.plj", "r") as prg:
+        return [parse_word(w) for w in prg.read().split()]
+
+
+program = parser()
+run_program(program)
+compile_program(program)  #TODO segmentation fault for printf second operation
