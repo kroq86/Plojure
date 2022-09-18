@@ -1,5 +1,6 @@
 { pkgs }: {
   deps = [
+    pkgs.tree
     pkgs.nasm
     pkgs.python38Full
   ];

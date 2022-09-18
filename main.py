@@ -43,11 +43,14 @@ def compile_program(program):
             lambda:
             (asm.write("    pop rax\n"), asm.write("    pop rbx\n"),
              asm.write("    add rax, rbx\n"), asm.write("    push rax\n")),
+            "minus":
+            lambda:
+            (asm.write("    pop rax\n"), asm.write("    pop rbx\n"),
+             asm.write("    sub rbx, rax\n"), asm.write("    push rbx\n")),
             "dump":
-            lambda: 
+            lambda:
             (asm.write("    mov rdi,printf_format\n"),
-             asm.write("    mov rsi,rax\n"),
-             asm.write("    call printf\n"))
+             asm.write("    mov rsi,rax\n"), asm.write("    call printf\n"))
         }
         for _ in program:
             dct[str(_[0][1])]()
@@ -58,4 +61,4 @@ def compile_program(program):
 
 
 run_program([mov(22), mov(11), pls(), dmp()])
-compile_program([mov(22), mov(11), pls(), dmp()])
+compile_program([mov(22), mov(11), mns(), dmp()])

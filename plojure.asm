@@ -6,8 +6,8 @@ main:
     push 11
     pop rax
     pop rbx
-    add rax, rbx
-    push rax
+    sub rbx, rax
+    push rbx
     mov rdi,printf_format
     mov rsi,rax
     call printf
