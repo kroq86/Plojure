@@ -24,8 +24,8 @@ def run_program(program):
     stack = []
     dct = {
         "move": lambda: stack.append(_[1]),
-        "plus": lambda: stack.append(stack.pop() + stack.pop()),  #todo reverse
-        "minus": lambda: stack.append(stack.pop() - stack.pop()),
+        "plus": lambda: stack.append(stack.pop() + stack.pop()),  
+        "minus": lambda: stack.append(stack.pop(0) - stack.pop()),
         "dump": lambda: print(stack.pop())
     }
     for _ in program:
@@ -50,4 +50,4 @@ def parser():
 
 program = parser()
 run_program(program)
-compile_program(program)  #TODO segmentation fault for printf second operation
+compile_program(program)  
