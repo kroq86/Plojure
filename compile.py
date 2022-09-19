@@ -14,7 +14,7 @@ def compile_program(program):
             "minus":
             lambda:
             (asm.write("    pop rax\n"), asm.write("    pop rbx\n"),
-             asm.write("    sub rbx, rax\n"), asm.write("    push rbx\n")),
+             asm.write("    sub rax, rbx\n"), asm.write("    push rax\n")),
             "dump":
             lambda:
             (asm.write("    mov rdi,printf_format\n"),

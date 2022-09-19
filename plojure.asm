@@ -6,8 +6,8 @@ main:
     push 22
     pop rax
     pop rbx
-    sub rbx, rax
-    push rbx
+    sub rax, rbx
+    push rax
     mov rdi,printf_format
     mov rsi,rax
     xor rax,rax
