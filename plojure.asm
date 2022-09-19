@@ -6,13 +6,35 @@ main:
     push 22
     pop rax
     pop rbx
-    sub rax, rbx
+    sub rbx, rax
+    mov rax, rbx
     push rax
     mov rdi,printf_format
     mov rsi,rax
     xor rax,rax
     call printf
     push 23
+    push 11
+    pop rax
+    pop rbx
+    add rax, rbx
+    push rax
+    mov rdi,printf_format
+    mov rsi,rax
+    xor rax,rax
+    call printf
+    push 21
+    push 11
+    pop rax
+    pop rbx
+    sub rbx, rax
+    mov rax, rbx
+    push rax
+    mov rdi,printf_format
+    mov rsi,rax
+    xor rax,rax
+    call printf
+    push 11
     push 11
     pop rax
     pop rbx
