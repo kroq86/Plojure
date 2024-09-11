@@ -1,5 +1,6 @@
 { pkgs }: {
   deps = [
+    pkgs.vim
     pkgs.tree
     pkgs.nasm
     pkgs.python38Full
