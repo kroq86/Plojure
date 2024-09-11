@@ -8,3 +8,8 @@ This project demonstrates the fundamentals of language interpretation and key co
 - Basic arithmetic operations
 - Conditional statements
 - Function definitions and calls
+
+## How to run 
+```
+python main.py program.lisp
+```
