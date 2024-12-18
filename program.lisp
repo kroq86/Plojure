@@ -68,3 +68,40 @@
       1
       (* base (power base (- exp 1)))))
 (print "Result of power:" (power 2 3))
+
+(define = eq)
+(define plus +)
+(define quotient /)
+(define times *)
+(define difference -)
+
+(define power 
+  (lambda (base exponent)
+    (cond 
+      ((eq exponent 0) 1)
+      ((eq exponent 1) base)
+      (t (times base (power base (difference exponent 1)))))))
+
+(print "Testing power function:")
+(power 2 3)  ; Should output 8
+
+(define is-power-of-two
+  (lambda (n)
+    (cond
+      ((< n 1) nil)
+      ((eq n 1) t)
+      ((eq (% n 2) 1) nil)
+      (t (is-power-of-two (quotient n 2))))))
+
+(print "Testing is-power-of-two:")
+(is-power-of-two 8)  ; Should output t
+
+(define log2
+  (lambda (n)
+    (cond
+      ((< n 1) nil)
+      ((eq n 1) 0)
+      (t (plus 1 (log2 (quotient n 2)))))))
+
+(print "Testing log2:")
+(log2 8)  ; Should output 3
