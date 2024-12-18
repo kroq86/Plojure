@@ -1,7 +1,6 @@
 import sys
 import traceback
 
-# Lisp interpreter functions
 def atom(x):
     return not isinstance(x, list)
 
@@ -49,9 +48,15 @@ def eval(x, env):
                 return proc(*values)
             raise TypeError(f"Attempted to call a non-callable object '{proc}'")
         elif op == 'define':
-            symbol, exp = args
-            env[symbol] = eval(exp, env)
-            return symbol
+            if isinstance(args[0], list):  # Check if it's a function definition
+                name = args[0][0]  # Function name
+                params = args[0][1:]  # Function parameters
+                body = args[1:]  # Function body
+                env[name] = lambda *vals: eval(['begin'] + body, dict(zip(params, vals), **env))
+            else:  # Variable definition
+                symbol, exp = args
+                env[symbol] = eval(exp, env)
+            return None
         elif op == 'lambda':
             params, *body = args
             return lambda *args: eval(['begin'] + body, dict(zip(params, args), **env))
@@ -118,14 +123,11 @@ def parse(tokens):
     else:
         return atom_val(token)
 
-
 def tokenize(s):
     return s.replace('(', ' ( ').replace(')', ' ) ').split()
 
-
 def read(s):
     return parse(tokenize(s))
-
 
 def atom_val(token):
     if token == 'nil': return False
@@ -137,7 +139,6 @@ def atom_val(token):
             return float(token)
         except ValueError:
             return str(token)
-
 
 def run_program(program, env=None):
     if env is None:
@@ -160,7 +161,6 @@ def run_program(program, env=None):
             current_expr = ""
     return env
 
-
 def repl():
     env = create_global_env()
     while True:
@@ -175,8 +175,6 @@ def repl():
             print(f"Error: {str(e)}")
             traceback.print_exc()
 
-
-# Main execution
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         with open(sys.argv[1], 'r') as file:
