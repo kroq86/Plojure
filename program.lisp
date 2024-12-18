@@ -10,7 +10,7 @@
 (define z (+ (* 2 3) (- 10 4)))
 (print "Arithmetic result z:" z)
 
-; Testing if
+; Testing if statement
 (if (< z 20)
     (print "z is less than 20")
     (print "z is greater or equal to 20"))
@@ -46,10 +46,9 @@
 (print "Number type of 0:" (number-type 0))
 (print "Number type of 10:" (number-type 10))
 
-; Testing car, cdr, cons
-(print "First element of x" (car x)) ; This is correct
-; Correct usage of cdr
-(print "Rest of x:" (cdr x)) ; Assuming x is defined and is a list
+; Testing car, cdr, and cons
+(print "First element of x:" (car x))
+(print "Rest of x:" (cdr x))
 (print "Adding element with cons:" (cons 0 x))
 
 ; Testing map with lambda
@@ -62,3 +61,10 @@
 (let ((a 5) (b 10))
   (let ((c (+ a b)))
     (print "Nested let c:" c)))
+
+; Testing recursion with power function
+(define (power base exp)
+  (if (eq exp 0)
+      1
+      (* base (power base (- exp 1)))))
+(print "Result of power:" (power 2 3))
