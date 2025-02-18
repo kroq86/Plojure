@@ -1,12 +1,9 @@
 import sys
 import traceback
+from functools import reduce
 
 def atom(x):
     return not isinstance(x, list)
-
-def while_loop(cond, body):
-    while eval(cond, env):
-        eval(body, env)
 
 def create_global_env():
     return {
@@ -19,147 +16,163 @@ def create_global_env():
         '>': lambda x, y: x > y,
         'eq': lambda x, y: x == y,
         'append': lambda x, y: x + y,
-        'car': lambda lst: lst[0] if isinstance(lst, list) and lst else None,
-        'cdr': lambda lst: lst[1:] if isinstance(lst, list) and lst else [],
+        'car': lambda lst: lst[0] if lst else None,
+        'cdr': lambda lst: lst[1:] if lst else [],
         'cons': lambda x, y: [x] + (y if isinstance(y, list) else [y]),
         'list': lambda *args: list(args),
-        'map': lambda func, lst: [func(x) for x in lst],
-        'filter': lambda func, lst: [x for x in lst if func(x)],
+        'map': lambda func, lst: list(map(func, lst)),
+        'filter': lambda func, lst: list(filter(func, lst)),
         'print': lambda *args: print(*args),
-        'while': lambda cond, body: while_loop(cond, body),
+        't': True,
+        'nil': None,
     }
 
-def eval(x, env):
-    try:
-        if atom(x):
-            if x == 'nil':
-                return False
-            if isinstance(x, str):  # Ensure x is a string when looking up symbols
-                return env.get(x, x)
-            return x  # Return as-is for non-symbol values
-        op, *args = x
-        #print(f"DEBUG: Evaluating op: {op}, args: {args}")
-        if op in env:  # Function call
-            proc = eval(op, env)
-            #print(f"DEBUG: Found proc: {proc}")
-            values = [eval(arg, env) for arg in args]
-            #print(f"DEBUG: Values: {values}")
-            if callable(proc):
-                return proc(*values)
-            raise TypeError(f"Attempted to call a non-callable object '{proc}'")
-        elif op == 'define':
-            if isinstance(args[0], list):  # Check if it's a function definition
-                name = args[0][0]  # Function name
-                params = args[0][1:]  # Function parameters
-                body = args[1:]  # Function body
-                env[name] = lambda *vals: eval(['begin'] + body, dict(zip(params, vals), **env))
-            else:  # Variable definition
-                symbol, exp = args
-                env[symbol] = eval(exp, env)
-            return None
-        elif op == 'lambda':
-            params, *body = args
-            return lambda *args: eval(['begin'] + body, dict(zip(params, args), **env))
-        elif op == 'begin':
-            for exp in args[:-1]:
-                eval(exp, env)
-            return eval(args[-1], env)
-        elif op == 'if':
-            if len(args) == 2:
-                condition, true_branch = args
-                false_branch = 'nil'
-            elif len(args) == 3:
-                condition, true_branch, false_branch = args
-            else:
-                raise ValueError(f"'if' requires 2 or 3 arguments, got {len(args)}")
-            if eval(condition, env):
-                return eval(true_branch, env)
-            else:
-                return eval(false_branch, env)
-        elif op == 'cond':
-            for clause in args:
-                if clause[0] == 't' or eval(clause[0], env):
-                    return eval(['begin'] + clause[1:], env)
-            return None
-        elif op == 'let':
-            bindings, *body = args
-            local_env = env.copy()
-            for symbol, value in bindings:
-                local_env[symbol] = eval(value, env)
-            return eval(['begin'] + body, local_env)
-        elif op == 'set!':
-            symbol, value = args
-            if symbol in env:
-                env[symbol] = eval(value, env)
-            else:
-                raise NameError(f"Attempting to set an undefined variable '{symbol}'")
-            return env[symbol]
-        else:
-            proc = eval(op, env)
-            values = [eval(arg, env) for arg in args]
-            print(f"DEBUG: Proc: {proc}, Values: {values}")
+def eval_expr(x, env):
+    if atom(x):
+        if isinstance(x, str):
+            if x in env:
+                result = env[x]
+                return result
             try:
-                return proc(*values)
-            except TypeError as e:
-                raise TypeError(f"Attempted to call a non-callable object '{proc}'. Did you forget to define it or provide a lambda?")
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        print("Traceback:")
-        traceback.print_exc()
+                result = atom_val(x)
+                return result
+            except ValueError:
+                return x
+        return x
+    
+    op, *args = x
+    if op == 'cond':
+        for condition, result in args:
+            if condition == 't' or eval_expr(condition, env):
+                result = eval_expr(result, env)
+                return result
         return None
+    elif op == 'set!':
+        symbol, exp = args
+        env[symbol] = eval_expr(exp, env)
+        return env[symbol]
+    elif op in env:
+        evaluated_args = []
+        for arg in args:
+            evaluated_arg = eval_expr(arg, env)
+            if isinstance(evaluated_arg, str):
+                try:
+                    evaluated_arg = atom_val(evaluated_arg)
+                except ValueError:
+                    pass
+            evaluated_args.append(evaluated_arg)
+            
+        try:
+            result = env[op](*evaluated_args)
+            if op == 'print':
+                return None  # print function already outputs
+            return result
+        except TypeError as e:
+            raise TypeError(f"Invalid argument types for operation '{op}': {evaluated_args}") from e
+    elif op == 'define':
+        if isinstance(args[0], list):  # Function definition
+            fname, *params = args[0]
+            body = args[1]
+            env[fname] = lambda *vals: eval_expr(body, {**env, **dict(zip(params, vals))})
+            return fname
+        else:  # Variable definition
+            symbol, exp = args
+            env[symbol] = eval_expr(exp, env)
+            return symbol
+    elif op == 'lambda':
+        params, *body = args
+        return lambda *vals: eval_expr(['begin'] + body, {**env, **dict(zip(params, vals))})
+    elif op == 'begin':
+        result = None
+        for exp in args:
+            result = eval_expr(exp, env)
+        return result
+    elif op == 'if':
+        condition, true_branch, false_branch = args + ['nil'] if len(args) == 2 else args
+        return eval_expr(true_branch, env) if eval_expr(condition, env) else eval_expr(false_branch, env)
+    elif op == 'let':
+        bindings, *body = args
+        new_env = env.copy()
+        for var, val in bindings:
+            new_env[var] = eval_expr(val, env)
+        return eval_expr(['begin'] + body, new_env)
+    return None
 
 def parse(tokens):
-    if len(tokens) == 0:
+    if not tokens:
         raise SyntaxError('unexpected EOF')
     token = tokens.pop(0)
-    if token == '(':
+    if token == '(':  
         L = []
-        while tokens[0] != ')':
+        while tokens:
+            if tokens[0] == ')':
+                tokens.pop(0)  # pop off ')'
+                return L
             L.append(parse(tokens))
-        tokens.pop(0)  # pop off ')'
-        return L
+        raise SyntaxError('unexpected EOF while reading')
     elif token == ')':
         raise SyntaxError('unexpected )')
-    else:
-        return atom_val(token)
+    return atom_val(token)
 
 def tokenize(s):
     return s.replace('(', ' ( ').replace(')', ' ) ').split()
 
 def read(s):
-    return parse(tokenize(s))
+    return parse(tokenize(s))[0]
 
 def atom_val(token):
-    if token == 'nil': return False
-    if token == 't': return True
     try:
         return int(token)
     except ValueError:
         try:
             return float(token)
         except ValueError:
-            return str(token)
+            return token
 
 def run_program(program, env=None):
-    if env is None:
-        env = create_global_env()
-    current_expr = ""
+    env = env or create_global_env()
+    current_expression = []
     paren_count = 0
-    for line in program.split('\n'):
-        line = line.strip()
-        if not line or line.startswith(';'):
+    
+    for line in filter(None, map(str.strip, program.split('\n'))):
+        if line.startswith(';'):  # Skip comments
+            print(f"\n{line}")  # Print comments as section headers
             continue
-        current_expr += " " + line
+            
+        # Count parentheses
         paren_count += line.count('(') - line.count(')')
-        if paren_count == 0:
+        current_expression.append(line)
+        
+        # If we have a complete expression
+        if paren_count == 0 and current_expression:
             try:
-                result = eval(read(current_expr), env)
+                full_expr = ' '.join(current_expression)
+                print(f"\nEvaluating: {full_expr}")
+                tokens = tokenize(full_expr)
+                parsed = parse(tokens)
+                result = eval_expr(parsed, env)
+                
+                # Handle different types of results
                 if result is not None:
-                    print(f"Result: {result}")
+                    if callable(result):
+                        print(f"Defined function")
+                    elif isinstance(result, str) and result in env and callable(env[result]):
+                        print(f"Defined function '{result}'")
+                    else:
+                        print(f"Result: {result}")
+                
+                current_expression = []
             except Exception as e:
-                print(f"Error in expression '{current_expr}': {str(e)}")
-            current_expr = ""
-    return env
+                print(f"Error: {e}")
+                traceback.print_exc()
+                current_expression = []
+        elif paren_count < 0:
+            print("Error: Unexpected closing parenthesis")
+            current_expression = []
+            paren_count = 0
+    
+    if current_expression:
+        print("Warning: Incomplete expression at end of file")
 
 def repl():
     env = create_global_env()
@@ -168,19 +181,17 @@ def repl():
             user_input = input("lisp> ")
             if user_input.lower() in ['exit', 'quit']:
                 break
-            result = eval(read(user_input), env)
+            result = eval_expr(read(user_input), env)
             if result is not None:
                 print(result)
         except Exception as e:
-            print(f"Error: {str(e)}")
+            print(f"Error: {e}")
             traceback.print_exc()
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         with open(sys.argv[1], 'r') as file:
-            program = file.read()
-        run_program(program)
+            run_program(file.read())
     else:
         print("Lisp Interpreter REPL")
-        print("Type 'exit' or 'quit' to end the session")
         repl()
