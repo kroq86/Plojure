@@ -1,3 +1,6 @@
+# GCC
+*.o
+
 # Python
 __pycache__/
 *.py[cod]
