@@ -47,3 +47,6 @@ htmlcov/
 # Editor backup files
 *~
 *.bak 
+
+# DuckDb
+vectors.duckdb
