@@ -4,3 +4,10 @@ gcc -shared -o mylib.so dot_product.o wrapper.o
 python vec.py
 
 python example_duckdb.py
+
+Persistent storage (DuckDB)
+Multiple search algorithms
+Different similarity metrics
+Memory management
+Parallel processing
+Transaction support

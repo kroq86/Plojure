@@ -11,6 +11,7 @@ from collections import OrderedDict
 import random
 from dataclasses import dataclass
 import psutil
+import time
 
 @dataclass
 class PerformanceMetrics:
@@ -21,50 +22,74 @@ class PerformanceMetrics:
     total_dimensions: int = 0
     cache_size: int = 0
 
+@dataclass
+class SearchMetrics:
+    exact_time: float = 0.0
+    approx_time: float = 0.0
+    lsh_time: float = 0.0
+    recall_at_k: float = 0.0
+    precision_at_k: float = 0.0
+    memory_used: float = 0.0
+    cache_hit_ratio: float = 0.0
+
 class LSHIndex:
-    def __init__(self, num_hash_functions: int = 10, num_bands: int = 5):
+    def __init__(self, num_hash_functions: int = 20, num_bands: int = 10):
         self.num_hash_functions = num_hash_functions
         self.num_bands = num_bands
         self.hash_ranges = None
         self.dimensions = None
         self.bucket_dict: Dict[int, List[str]] = {}
+        self.vector_count = 0
     
     def _initialize_hash_ranges(self, dimensions: int):
         if self.dimensions != dimensions:
             self.dimensions = dimensions
-            self.hash_ranges = np.random.randn(self.num_hash_functions, dimensions)
+            # Use normal distribution for better hyperplane separation
+            self.hash_ranges = np.random.normal(0, 1, (self.num_hash_functions, dimensions))
+            # Normalize the hash ranges
+            self.hash_ranges /= np.linalg.norm(self.hash_ranges, axis=1)[:, np.newaxis]
     
     def _hash_vector(self, vector: List[float]) -> List[int]:
-        vector_array = np.array(vector)
+        vector_array = np.array(vector, dtype=np.float64)
         if self.hash_ranges is None or self.dimensions != len(vector):
             self._initialize_hash_ranges(len(vector))
+        # Normalize the input vector
+        vector_array /= np.linalg.norm(vector_array)
         projections = np.dot(self.hash_ranges, vector_array)
         return (projections > 0).astype(int).tolist()
     
     def insert(self, key: str, vector: List[float]):
+        self.vector_count += 1
         hash_signature = self._hash_vector(vector)
+        
+        # Use multiple bands for better recall
         for band in range(self.num_bands):
             start_idx = band * (self.num_hash_functions // self.num_bands)
             end_idx = start_idx + (self.num_hash_functions // self.num_bands)
             band_signature = tuple(hash_signature[start_idx:end_idx])
-            band_hash = hash(band_signature + (band,))
+            band_hash = hash((band, band_signature))
             
             if band_hash not in self.bucket_dict:
                 self.bucket_dict[band_hash] = []
             self.bucket_dict[band_hash].append(key)
     
-    def query(self, vector: List[float], threshold: float = 0.8) -> List[str]:
+    def query(self, vector: List[float], min_candidates: int = 100) -> List[str]:
         hash_signature = self._hash_vector(vector)
         candidate_keys = set()
         
+        # Query all bands
         for band in range(self.num_bands):
             start_idx = band * (self.num_hash_functions // self.num_bands)
             end_idx = start_idx + (self.num_hash_functions // self.num_bands)
             band_signature = tuple(hash_signature[start_idx:end_idx])
-            band_hash = hash(band_signature + (band,))
+            band_hash = hash((band, band_signature))
             
             if band_hash in self.bucket_dict:
                 candidate_keys.update(self.bucket_dict[band_hash])
+        
+        # If too few candidates, use more bands or return all keys
+        if len(candidate_keys) < min_candidates:
+            return list(set().union(*self.bucket_dict.values()))
         
         return list(candidate_keys)
 
@@ -85,6 +110,7 @@ class DuckDBVectorDatabase:
         self._current_cache_size = 0
         self.metrics = PerformanceMetrics()
         self.lsh_index = LSHIndex()
+        self._vector_dimension = None
 
     def load_library(self):
         self.mylib = CDLL('./mylib.so')
@@ -122,13 +148,19 @@ class DuckDBVectorDatabase:
             return vector
 
     def _monitor_cache_size(self, vector: List[float]) -> int:
-        return sys.getsizeof(vector) + sys.getsizeof(float()) * len(vector)
+        # More accurate memory calculation: 8 bytes per double + Python list overhead
+        return len(vector) * 8 + 64  # 64 bytes for Python list overhead
 
     def _evict_cache(self):
         with self._cache_lock:
-            while self._current_cache_size > self.max_cache_size and self._cache:
-                _, vector = self._cache.popitem(last=False)
-                self._current_cache_size -= self._monitor_cache_size(vector)
+            # Evict in larger chunks for better efficiency
+            target_size = self.max_cache_size * 0.8  # Keep 20% free
+            while self._current_cache_size > target_size and self._cache:
+                for _ in range(min(100, len(self._cache))):  # Evict up to 100 items at once
+                    _, vector = self._cache.popitem(last=False)
+                    self._current_cache_size -= self._monitor_cache_size(vector)
+                if self._current_cache_size <= target_size:
+                    break
 
     def _set_cached_vector(self, key: str, vector: List[float]):
         with self._cache_lock:
@@ -337,4 +369,42 @@ class DuckDBVectorDatabase:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close() 
+        self.close()
+
+    def calculate_recall(self, exact_results: List[Tuple[str, float]], 
+                        approx_results: List[Tuple[str, float]], k: int) -> float:
+        exact_keys = set(key for key, _ in exact_results[:k])
+        approx_keys = set(key for key, _ in approx_results[:k])
+        return len(exact_keys.intersection(approx_keys)) / k if k > 0 else 0.0
+
+    def search_with_metrics(self, query_vector: List[float], k: int) -> SearchMetrics:
+        metrics = SearchMetrics()
+        process = psutil.Process()
+        
+        # Exact search
+        start_time = time.time()
+        exact_results = self._exact_search(query_vector, k)
+        metrics.exact_time = time.time() - start_time
+        
+        # Approximate search
+        start_time = time.time()
+        approx_results = self.approximate_search(query_vector, k, self.chunk_size // 10)
+        metrics.approx_time = time.time() - start_time
+        
+        # LSH search
+        start_time = time.time()
+        lsh_results = self.lsh_search(query_vector, k)
+        metrics.lsh_time = time.time() - start_time
+        
+        # Calculate recall for both approximate methods
+        metrics.recall_at_k = max(
+            self.calculate_recall(exact_results, approx_results, k),
+            self.calculate_recall(exact_results, lsh_results, k)
+        )
+        
+        # Memory and cache metrics
+        metrics.memory_used = process.memory_info().rss / 1024 / 1024
+        total_ops = self.metrics.cache_hits + self.metrics.cache_misses
+        metrics.cache_hit_ratio = self.metrics.cache_hits / total_ops if total_ops > 0 else 0
+        
+        return metrics 
