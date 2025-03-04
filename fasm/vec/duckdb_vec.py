@@ -1,6 +1,6 @@
 import duckdb
 import numpy as np
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Callable, Literal
 import ctypes
 from ctypes import CDLL, POINTER, c_double, c_int
 import json
@@ -8,17 +8,75 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 import sys
 from collections import OrderedDict
+import random
+from dataclasses import dataclass
+import psutil
+
+@dataclass
+class PerformanceMetrics:
+    cache_hits: int = 0
+    cache_misses: int = 0
+    memory_usage: float = 0.0
+    total_vectors: int = 0
+    total_dimensions: int = 0
+    cache_size: int = 0
+
+class LSHIndex:
+    def __init__(self, num_hash_functions: int = 10, num_bands: int = 5):
+        self.num_hash_functions = num_hash_functions
+        self.num_bands = num_bands
+        self.hash_ranges = np.random.randn(num_hash_functions, 128)  # Random projection vectors
+        self.bucket_dict: Dict[int, List[str]] = {}
+    
+    def _hash_vector(self, vector: List[float]) -> List[int]:
+        vector_array = np.array(vector)
+        projections = np.dot(self.hash_ranges, vector_array)
+        return (projections > 0).astype(int).tolist()
+    
+    def insert(self, key: str, vector: List[float]):
+        hash_signature = self._hash_vector(vector)
+        for band in range(self.num_bands):
+            start_idx = band * (self.num_hash_functions // self.num_bands)
+            end_idx = start_idx + (self.num_hash_functions // self.num_bands)
+            band_signature = tuple(hash_signature[start_idx:end_idx])
+            band_hash = hash(band_signature + (band,))
+            
+            if band_hash not in self.bucket_dict:
+                self.bucket_dict[band_hash] = []
+            self.bucket_dict[band_hash].append(key)
+    
+    def query(self, vector: List[float], threshold: float = 0.8) -> List[str]:
+        hash_signature = self._hash_vector(vector)
+        candidate_keys = set()
+        
+        for band in range(self.num_bands):
+            start_idx = band * (self.num_hash_functions // self.num_bands)
+            end_idx = start_idx + (self.num_hash_functions // self.num_bands)
+            band_signature = tuple(hash_signature[start_idx:end_idx])
+            band_hash = hash(band_signature + (band,))
+            
+            if band_hash in self.bucket_dict:
+                candidate_keys.update(self.bucket_dict[band_hash])
+        
+        return list(candidate_keys)
 
 class DuckDBVectorDatabase:
-    def __init__(self, db_path: str = ':memory:', chunk_size: int = 1000, max_cache_size: int = 1024 * 1024 * 1024):
+    def __init__(self, 
+                 db_path: str = ':memory:', 
+                 chunk_size: int = 1000, 
+                 max_cache_size: int = 1024 * 1024 * 1024,
+                 similarity_metric: Literal["cosine", "euclidean", "dot_product"] = "cosine"):
         self.conn = duckdb.connect(db_path)
         self.chunk_size = chunk_size
         self.max_cache_size = max_cache_size
+        self.similarity_metric = similarity_metric
         self.load_library()
         self._initialize_db()
         self._cache: OrderedDict[str, List[float]] = OrderedDict()
         self._cache_lock = Lock()
         self._current_cache_size = 0
+        self.metrics = PerformanceMetrics()
+        self.lsh_index = LSHIndex()
 
     def load_library(self):
         self.mylib = CDLL('./mylib.so')
@@ -48,7 +106,12 @@ class DuckDBVectorDatabase:
 
     def _get_cached_vector(self, key: str) -> Optional[List[float]]:
         with self._cache_lock:
-            return self._cache.get(key)
+            vector = self._cache.get(key)
+            if vector is not None:
+                self.metrics.cache_hits += 1
+            else:
+                self.metrics.cache_misses += 1
+            return vector
 
     def _monitor_cache_size(self, vector: List[float]) -> int:
         return sys.getsizeof(vector) + sys.getsizeof(float()) * len(vector)
@@ -69,6 +132,33 @@ class DuckDBVectorDatabase:
             if self._current_cache_size > self.max_cache_size:
                 self._evict_cache()
 
+    def get_metrics(self) -> PerformanceMetrics:
+        process = psutil.Process()
+        self.metrics.memory_usage = process.memory_info().rss / 1024 / 1024  # MB
+        self.metrics.cache_size = self._current_cache_size
+        self.metrics.total_vectors = self.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        return self.metrics
+
+    def _calculate_similarity(self, v1: List[float], v2: List[float]) -> float:
+        v1_array = (c_double * len(v1))(*v1)
+        v2_array = (c_double * len(v2))(*v2)
+
+        if self.similarity_metric == "cosine":
+            dot_product = self.mylib.py_dot_product(v1_array, v2_array, len(v1))
+            norm_v1 = self.mylib.py_vector_norm(v1_array, len(v1))
+            norm_v2 = self.mylib.py_vector_norm(v2_array, len(v2))
+            
+            if norm_v1 == 0 or norm_v2 == 0:
+                return 0.0
+            return dot_product / (norm_v1 * norm_v2)
+        
+        elif self.similarity_metric == "euclidean":
+            diff = np.array(v1) - np.array(v2)
+            return -np.sqrt(np.sum(diff * diff))  # Negative because larger values should be "more similar"
+        
+        else:  # dot_product
+            return self.mylib.py_dot_product(v1_array, v2_array, len(v1))
+
     def insert(self, key: str, vector: List[float], partition_id: Optional[int] = None) -> None:
         if partition_id is None:
             partition_id = hash(key) % (self.chunk_size)
@@ -79,6 +169,7 @@ class DuckDBVectorDatabase:
             VALUES (?, ?, ?, ?)
         """, [key, vector_data, len(vector), partition_id])
         self._set_cached_vector(key, vector)
+        self.lsh_index.insert(key, vector)
 
     def retrieve(self, key: str) -> List[float]:
         cached = self._get_cached_vector(key)
@@ -116,11 +207,19 @@ class DuckDBVectorDatabase:
         similarities = []
         for key, vector_data, dimensions in partition_vectors:
             vector = self._deserialize_vector(vector_data, dimensions)
-            similarity = self.cosine_similarity(query_vector, vector)
+            similarity = self._calculate_similarity(query_vector, vector)
             similarities.append((key, similarity))
         return similarities
 
-    def search(self, query_vector: List[float], k: int, num_threads: int = 4) -> List[Tuple[str, float]]:
+    def search(self, query_vector: List[float], k: int, method: Literal["exact", "approximate", "lsh"] = "exact", num_threads: int = 4) -> List[Tuple[str, float]]:
+        if method == "lsh":
+            return self.lsh_search(query_vector, k)
+        elif method == "approximate":
+            return self.approximate_search(query_vector, k, self.chunk_size // 10)
+        else:
+            return self._exact_search(query_vector, k, num_threads)
+
+    def _exact_search(self, query_vector: List[float], k: int, num_threads: int = 4) -> List[Tuple[str, float]]:
         all_partitions = self.conn.execute("""
             SELECT DISTINCT partition_id FROM vectors
         """).fetchall()
@@ -144,6 +243,19 @@ class DuckDBVectorDatabase:
         
         all_similarities.sort(key=lambda x: x[1], reverse=True)
         return all_similarities[:k]
+
+    def lsh_search(self, query_vector: List[float], k: int) -> List[Tuple[str, float]]:
+        candidate_keys = self.lsh_index.query(query_vector)
+        similarities = []
+        
+        for key in candidate_keys:
+            vector = self.retrieve(key)
+            if vector is not None:
+                similarity = self._calculate_similarity(query_vector, vector)
+                similarities.append((key, similarity))
+        
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        return similarities[:k]
 
     def batch_insert(self, vectors: List[Tuple[str, List[float]]], partition_size: Optional[int] = None) -> None:
         if partition_size is None:
