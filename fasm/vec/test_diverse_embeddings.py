@@ -10,7 +10,7 @@ def generate_text_embeddings(num_vectors: int, dimensions: int = 768) -> List[Tu
     """Simulate BERT-like text embeddings."""
     vectors = []
     # Create clusters to simulate semantic similarity
-    num_clusters = 20
+    num_clusters = 2
     cluster_centers = np.random.normal(0, 1, (num_clusters, dimensions))
     # Normalize cluster centers
     cluster_centers = cluster_centers / np.linalg.norm(cluster_centers, axis=1)[:, np.newaxis]
@@ -32,7 +32,7 @@ def generate_image_embeddings(num_vectors: int, dimensions: int = 2048) -> List[
     """Simulate ResNet-like image embeddings."""
     vectors = []
     # Create feature clusters to simulate visual similarity
-    num_clusters = 15
+    num_clusters = 2
     cluster_centers = np.random.normal(0, 1, (num_clusters, dimensions))
     # Normalize cluster centers
     cluster_centers = cluster_centers / np.linalg.norm(cluster_centers, axis=1)[:, np.newaxis]
@@ -184,13 +184,13 @@ def visualize_embeddings(vectors: List[Tuple[str, List[float]]], title: str):
 
 def main():
     # Test parameters
-    num_vectors = 10000
-    k = 5
+    num_vectors = 1000
+    k = 2
     
     # Initialize database with smaller chunk size for better distribution
     db = DuckDBVectorDatabase(
         ":memory:",
-        chunk_size=500,
+        chunk_size=50,
         max_cache_size=1024 * 1024 * 1024
     )
     
