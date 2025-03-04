@@ -120,9 +120,14 @@ class DuckDBVectorDatabase:
         self.mylib.py_vector_norm.restype = c_double
 
     def _initialize_db(self):
-        # Create table first
+        # Drop existing indices first to avoid conflicts
+        self.conn.execute("DROP INDEX IF EXISTS idx_vectors_key")
+        self.conn.execute("DROP INDEX IF EXISTS idx_vectors_partition")
+        
+        # Drop and recreate table
+        self.conn.execute("DROP TABLE IF EXISTS vectors")
         self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS vectors (
+            CREATE TABLE vectors (
                 key VARCHAR PRIMARY KEY,
                 vector BLOB,
                 dimensions INTEGER,
@@ -130,9 +135,10 @@ class DuckDBVectorDatabase:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Then create indices
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_vectors_key ON vectors(key)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_vectors_partition ON vectors(partition_id)")
+        
+        # Create indices after table
+        self.conn.execute("CREATE INDEX idx_vectors_key ON vectors(key)")
+        self.conn.execute("CREATE INDEX idx_vectors_partition ON vectors(partition_id)")
 
     def _serialize_vector(self, vector: List[float]) -> bytes:
         return np.array(vector, dtype=np.float64).tobytes()
@@ -287,11 +293,11 @@ class DuckDBVectorDatabase:
         return all_similarities[:k]
 
     def lsh_search(self, query_vector: List[float], k: int) -> List[Tuple[str, float]]:
-        # Get candidates from LSH
-        candidate_keys = self.lsh_index.query(query_vector)
-        if not candidate_keys:
-            # Fallback to approximate search if no candidates found
-            return self.approximate_search(query_vector, k, self.chunk_size // 10)
+        # Get candidates from LSH with increased min_candidates
+        candidate_keys = self.lsh_index.query(query_vector, min_candidates=k * 10)
+        if not candidate_keys or len(candidate_keys) < k:
+            # Fallback to approximate search if too few candidates
+            return self.approximate_search(query_vector, k, self.chunk_size // 5)
         
         # Batch retrieve vectors for better performance
         placeholders = ','.join(['?' for _ in candidate_keys])
@@ -299,7 +305,8 @@ class DuckDBVectorDatabase:
             SELECT key, vector, dimensions 
             FROM vectors 
             WHERE key IN ({placeholders})
-        """, candidate_keys).fetchall()
+            LIMIT ?  -- Limit the number of vectors to process
+        """, [*candidate_keys, min(len(candidate_keys), k * 20)]).fetchall()
         
         # Calculate similarities in parallel
         similarities = []
@@ -347,20 +354,26 @@ class DuckDBVectorDatabase:
         total_vectors = self.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
         sample_ratio = min(1.0, sample_size / total_vectors)
         
-        # Improved stratified sampling across partitions
+        # Improved stratified sampling with better partition coverage
         sampled_vectors = self.conn.execute("""
             WITH partitions AS (
                 SELECT DISTINCT partition_id,
-                       COUNT(*) OVER (PARTITION BY partition_id) as partition_size
+                       COUNT(*) OVER (PARTITION BY partition_id) as partition_size,
+                       SUM(1) OVER () as total_vectors
                 FROM vectors
             )
             SELECT v.key, v.vector, v.dimensions 
             FROM vectors v
             JOIN partitions p ON v.partition_id = p.partition_id
-            WHERE random() <= ? * (1.0 + LOG(p.partition_size))
+            WHERE random() <= ? * (1.0 + LOG10(p.partition_size))
+                  OR partition_size <= ?  -- Include all vectors from small partitions
             ORDER BY random()
             LIMIT ?
-        """, [sample_ratio * 2, sample_size * 2]).fetchall()  # Double the sample size for better recall
+        """, [
+            sample_ratio * 3,  # Triple the sample ratio
+            k * 2,  # Small partition threshold
+            sample_size * 4  # Quadruple the sample size
+        ]).fetchall()
         
         # Process in parallel for better performance
         similarities = []
