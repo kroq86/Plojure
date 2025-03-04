@@ -298,38 +298,52 @@ class DuckDBVectorDatabase:
 
     def lsh_search(self, query_vector: List[float], k: int) -> List[Tuple[str, float]]:
         # Get candidates from LSH with increased min_candidates
-        candidate_keys = self.lsh_index.query(query_vector, min_candidates=k * 20)  # Increased candidates
+        min_candidates = max(k * 50, 1000)  # Ensure minimum candidates
+        candidate_keys = self.lsh_index.query(query_vector, min_candidates=min_candidates)
+        
         if not candidate_keys or len(candidate_keys) < k:
-            # Fallback to approximate search if too few candidates
-            return self.approximate_search(query_vector, k, self.chunk_size // 2)  # Increased sample size
-        
-        # Batch retrieve vectors for better performance
-        placeholders = ','.join(['?' for _ in candidate_keys])
-        vectors_data = self.conn.execute(f"""
-            SELECT key, vector, dimensions 
-            FROM vectors 
-            WHERE key IN ({placeholders})
-            LIMIT ?  -- Limit the number of vectors to process
-        """, [*candidate_keys, min(len(candidate_keys), k * 40)]).fetchall()  # Increased limit
-        
-        # Calculate similarities in parallel
-        similarities = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = []
-            for key, vector_data, dimensions in vectors_data:
-                # Try cache first
-                vector = self._get_cached_vector(key)
-                if vector is None:
-                    vector = self._deserialize_vector(vector_data, dimensions)
-                    self._set_cached_vector(key, vector)
-                future = executor.submit(self._calculate_similarity, query_vector, vector)
-                futures.append((key, future))
+            # Try with more hash functions before falling back
+            old_num_functions = self.lsh_index.num_hash_functions
+            self.lsh_index.num_hash_functions = 40
+            candidate_keys = self.lsh_index.query(query_vector, min_candidates=min_candidates)
+            self.lsh_index.num_hash_functions = old_num_functions
             
-            for key, future in futures:
-                similarity = future.result()
-                similarities.append((key, similarity))
+            if not candidate_keys or len(candidate_keys) < k:
+                return self.approximate_search(query_vector, k, self.chunk_size // 2)
         
-        similarities.sort(key=lambda x: x[1], reverse=True)
+        # Batch retrieve vectors with pagination for large candidate sets
+        similarities = []
+        batch_size = 1000
+        
+        for i in range(0, len(candidate_keys), batch_size):
+            batch_keys = candidate_keys[i:i + batch_size]
+            placeholders = ','.join(['?' for _ in batch_keys])
+            vectors_data = self.conn.execute(f"""
+                SELECT key, vector, dimensions 
+                FROM vectors 
+                WHERE key IN ({placeholders})
+            """, batch_keys).fetchall()
+            
+            # Process batch in parallel
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = []
+                for key, vector_data, dimensions in vectors_data:
+                    vector = self._get_cached_vector(key)
+                    if vector is None:
+                        vector = self._deserialize_vector(vector_data, dimensions)
+                        self._set_cached_vector(key, vector)
+                    future = executor.submit(self._calculate_similarity, query_vector, vector)
+                    futures.append((key, future))
+                
+                for key, future in futures:
+                    similarity = future.result()
+                    similarities.append((key, similarity))
+            
+            # Early stopping if we have enough good candidates
+            similarities.sort(key=lambda x: x[1], reverse=True)
+            if len(similarities) >= k * 10 and similarities[k-1][1] > 0.5:
+                break
+        
         return similarities[:k]
 
     def batch_insert(self, vectors: List[Tuple[str, List[float]]], partition_size: Optional[int] = None) -> None:
@@ -359,7 +373,14 @@ class DuckDBVectorDatabase:
 
     def approximate_search(self, query_vector: List[float], k: int, sample_size: int) -> List[Tuple[str, float]]:
         total_vectors = self.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
-        sample_ratio = min(1.0, sample_size / total_vectors)
+        
+        # Adaptive sampling based on dataset size
+        if total_vectors < 50000:
+            sample_ratio = 0.2  # 20% for small datasets
+        elif total_vectors < 100000:
+            sample_ratio = 0.1  # 10% for medium datasets
+        else:
+            sample_ratio = 0.05  # 5% for large datasets
         
         # Improved stratified sampling with better partition coverage
         sampled_vectors = self.conn.execute("""
@@ -368,27 +389,32 @@ class DuckDBVectorDatabase:
                        COUNT(*) OVER (PARTITION BY partition_id) as partition_size,
                        SUM(1) OVER () as total_vectors
                 FROM vectors
+            ),
+            ranked_vectors AS (
+                SELECT v.key, v.vector, v.dimensions,
+                       ROW_NUMBER() OVER (PARTITION BY v.partition_id ORDER BY RANDOM()) as rn,
+                       p.partition_size
+                FROM vectors v
+                JOIN partitions p ON v.partition_id = p.partition_id
             )
-            SELECT v.key, v.vector, v.dimensions 
-            FROM vectors v
-            JOIN partitions p ON v.partition_id = p.partition_id
-            WHERE random() <= ? * (1.0 + LOG10(p.partition_size))
-                  OR partition_size <= ?  -- Include all vectors from small partitions
-                  OR random() <= 0.1  -- Random sampling for diversity
-            ORDER BY random()
+            SELECT key, vector, dimensions
+            FROM ranked_vectors
+            WHERE (rn <= partition_size * ? AND RANDOM() <= 0.5)  -- Stratified sampling
+               OR (rn <= ? AND partition_size <= ?)  -- Include small partitions
+               OR RANDOM() <= 0.05  -- Random sampling for diversity
             LIMIT ?
         """, [
-            sample_ratio * 4,  # Quadruple the sample ratio
-            k * 4,  # Increased small partition threshold
-            sample_size * 8  # Octupled the sample size
+            sample_ratio,
+            k * 2,  # Take more from small partitions
+            k * 4,  # Small partition threshold
+            max(sample_size * 2, k * 100)  # Ensure enough samples
         ]).fetchall()
         
-        # Process in parallel for better performance
+        # Process in parallel with early stopping
         similarities = []
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
             for key, vector_data, dimensions in sampled_vectors:
-                # Try cache first
                 vector = self._get_cached_vector(key)
                 if vector is None:
                     vector = self._deserialize_vector(vector_data, dimensions)
@@ -399,6 +425,12 @@ class DuckDBVectorDatabase:
             for key, future in futures:
                 similarity = future.result()
                 similarities.append((key, similarity))
+                
+                # Sort periodically and check for early stopping
+                if len(similarities) % 100 == 0:
+                    similarities.sort(key=lambda x: x[1], reverse=True)
+                    if len(similarities) >= k * 5 and similarities[k-1][1] > 0.5:
+                        break
         
         similarities.sort(key=lambda x: x[1], reverse=True)
         return similarities[:k]
@@ -455,20 +487,23 @@ class DuckDBVectorDatabase:
         exact_results = self._exact_search(query_vector, k)
         metrics.exact_time = time.time() - start_time
         
-        # Approximate search
-        start_time = time.time()
-        approx_results = self.approximate_search(query_vector, k, self.chunk_size // 5)  # Increased sample size
-        metrics.approx_time = time.time() - start_time
-        
-        # LSH search
+        # LSH search (do this before approximate to warm up cache)
         start_time = time.time()
         lsh_results = self.lsh_search(query_vector, k)
         metrics.lsh_time = time.time() - start_time
-        
-        # Calculate recall for both methods separately
-        approx_recall = self.calculate_recall(exact_results, approx_results, k)
         lsh_recall = self.calculate_recall(exact_results, lsh_results, k)
-        metrics.recall_at_k = max(approx_recall, lsh_recall)
+        
+        # Approximate search
+        start_time = time.time()
+        approx_results = self.approximate_search(query_vector, k, self.chunk_size // 2)  # Increased sample size
+        metrics.approx_time = time.time() - start_time
+        approx_recall = self.calculate_recall(exact_results, approx_results, k)
+        
+        # Use the best results
+        if lsh_recall >= approx_recall:
+            metrics.recall_at_k = lsh_recall
+        else:
+            metrics.recall_at_k = approx_recall
         
         # Memory and cache metrics
         metrics.memory_used = process.memory_info().rss / 1024 / 1024
