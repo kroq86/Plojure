@@ -49,20 +49,34 @@ def generate_audio_embeddings(num_vectors: int, dimensions: int = 512) -> List[T
     vectors = []
     num_patterns = 4  # Reduced number of patterns for clearer clusters
     base_patterns = []
+    
+    # Generate base patterns with guaranteed non-zero values
     for p in range(num_patterns):
-        pattern = np.sin(np.linspace(0, 20 * p, dimensions))  # Increased frequency separation
-        pattern = pattern / np.linalg.norm(pattern)
+        # Use cosine waves with different frequencies and phases to ensure non-zero patterns
+        t = np.linspace(0, 2*np.pi, dimensions)
+        pattern = np.cos(t * (p + 1)) + np.sin(t * (p + 2))
+        norm = np.linalg.norm(pattern)
+        if norm > 0:  # Ensure we don't divide by zero
+            pattern = pattern / norm
+        else:
+            pattern = np.ones(dimensions) / np.sqrt(dimensions)  # Fallback to uniform vector
         base_patterns.append(pattern)
     
     cluster_vectors = {i: [] for i in range(num_patterns)}
     for i in range(num_vectors):
         pattern_idx = i % num_patterns
         base = base_patterns[pattern_idx]
-        noise = np.random.normal(0, 0.02, dimensions)  # Reduced noise
+        noise = np.random.normal(0, 0.02, dimensions)  # Small noise
         vector = base + noise
-        vector = vector / np.linalg.norm(vector)
+        # Safe normalization
+        norm = np.linalg.norm(vector)
+        if norm > 0:
+            vector = vector / norm
+        else:
+            vector = np.ones(dimensions) / np.sqrt(dimensions)  # Fallback to uniform vector
         vectors.append((f"audio_{i}", list(vector)))
         cluster_vectors[pattern_idx].append((f"audio_{i}", list(vector)))
+    
     return vectors, cluster_vectors
 
 def validate_clusters(cluster_vectors: dict, similarity_metric: str = "cosine") -> float:
@@ -80,8 +94,18 @@ def validate_clusters(cluster_vectors: dict, similarity_metric: str = "cosine") 
                 vec1 = np.array(cluster[i][1])
                 vec2 = np.array(cluster[j][1])
                 
+                # Skip invalid vectors
+                if np.any(np.isnan(vec1)) or np.any(np.isnan(vec2)):
+                    continue
+                
                 if similarity_metric == "cosine":
-                    similarity = np.dot(vec1, vec2)
+                    # Safe cosine similarity calculation
+                    norm1 = np.linalg.norm(vec1)
+                    norm2 = np.linalg.norm(vec2)
+                    if norm1 > 0 and norm2 > 0:
+                        similarity = np.dot(vec1, vec2) / (norm1 * norm2)
+                    else:
+                        continue
                 elif similarity_metric == "euclidean":
                     similarity = -np.linalg.norm(vec1 - vec2)  # Negative because smaller is better
                 else:  # dot_product
@@ -171,25 +195,42 @@ def test_embedding_type(db: DuckDBVectorDatabase, vectors: List[Tuple[str, List[
 
 def visualize_embeddings(vectors: List[Tuple[str, List[float]]], title: str):
     """Visualize embeddings using t-SNE."""
-    # Extract vectors
+    # Extract vectors and filter out any invalid values
     vector_data = np.array([v[1] for v in vectors])
+    
+    # Check for and remove any NaN values
+    valid_indices = ~np.any(np.isnan(vector_data), axis=1)
+    if not np.all(valid_indices):
+        print(f"Warning: Found {np.sum(~valid_indices)} invalid vectors in {title}, removing them for visualization")
+        vector_data = vector_data[valid_indices]
+    
+    if len(vector_data) == 0:
+        print(f"Error: No valid vectors to visualize for {title}")
+        return
+        
+    # Use subset for speed but ensure we have enough valid vectors
+    max_vectors = min(1000, len(vector_data))
+    vector_subset = vector_data[:max_vectors]
     
     # Apply t-SNE
     tsne = TSNE(n_components=2, random_state=42)
-    embedded = tsne.fit_transform(vector_data[:1000])  # Use subset for speed
-    
-    # Plot
-    plt.figure(figsize=(10, 8))
-    plt.scatter(embedded[:, 0], embedded[:, 1], alpha=0.5)
-    plt.title(f't-SNE visualization of {title}')
-    plt.savefig(f'tsne_{title}.png')
-    plt.close()
-    
-    # Calculate and print clustering metrics
-    distances = np.linalg.norm(vector_data[:1000] - vector_data[:1000].mean(axis=0), axis=1)
-    print(f"\n{title} Statistics:")
-    print(f"Mean L2 distance from center: {distances.mean():.4f}")
-    print(f"Std L2 distance from center: {distances.std():.4f}")
+    try:
+        embedded = tsne.fit_transform(vector_subset)
+        
+        # Plot
+        plt.figure(figsize=(10, 8))
+        plt.scatter(embedded[:, 0], embedded[:, 1], alpha=0.5)
+        plt.title(f't-SNE visualization of {title}')
+        plt.savefig(f'tsne_{title}.png')
+        plt.close()
+        
+        # Calculate and print clustering metrics
+        distances = np.linalg.norm(vector_subset - vector_subset.mean(axis=0), axis=1)
+        print(f"\n{title} Statistics:")
+        print(f"Mean L2 distance from center: {distances.mean():.4f}")
+        print(f"Std L2 distance from center: {distances.std():.4f}")
+    except Exception as e:
+        print(f"Error visualizing {title}: {str(e)}")
 
 def main():
     # Test parameters
