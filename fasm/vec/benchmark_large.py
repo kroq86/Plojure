@@ -56,10 +56,14 @@ def print_results(results: Dict):
     # Search performance comparison
     search_data = []
     for method, data in results["search"].items():
+        best_similarity = "N/A"
+        if data["results"] and len(data["results"]) > 0:
+            best_similarity = f"{data['results'][0][1]:.4f}"
+        
         search_data.append([
             method,
             f"{data['time']:.4f}s",
-            f"{data['results'][0][1]:.4f}"
+            best_similarity
         ])
     
     print("\nSearch Performance:")
@@ -70,7 +74,8 @@ def print_results(results: Dict):
     print("\nPerformance Metrics:")
     print(f"Cache hits: {metrics.cache_hits}")
     print(f"Cache misses: {metrics.cache_misses}")
-    print(f"Cache hit ratio: {metrics.cache_hits/(metrics.cache_hits + metrics.cache_misses):.2%}")
+    hit_ratio = 0 if metrics.cache_hits + metrics.cache_misses == 0 else metrics.cache_hits/(metrics.cache_hits + metrics.cache_misses)
+    print(f"Cache hit ratio: {hit_ratio:.2%}")
     print(f"Memory usage: {metrics.memory_usage:.2f} MB")
     print(f"Total vectors: {metrics.total_vectors}")
     print(f"Cache size: {metrics.cache_size/1024/1024:.2f} MB")
@@ -120,10 +125,14 @@ def main():
         
         metric_data = []
         for metric, data in similarity_results.items():
+            best_score = "N/A"
+            if data["results"] and len(data["results"]) > 0:
+                best_score = f"{data['results'][0][1]:.4f}"
+            
             metric_data.append([
                 metric,
                 f"{data['time']:.4f}s",
-                f"{data['results'][0][1]:.4f}"
+                best_score
             ])
         
         print(tabulate(metric_data, headers=["Metric", "Time", "Best Score"]))

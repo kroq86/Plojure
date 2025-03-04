@@ -25,11 +25,19 @@ class LSHIndex:
     def __init__(self, num_hash_functions: int = 10, num_bands: int = 5):
         self.num_hash_functions = num_hash_functions
         self.num_bands = num_bands
-        self.hash_ranges = np.random.randn(num_hash_functions, 128)  # Random projection vectors
+        self.hash_ranges = None
+        self.dimensions = None
         self.bucket_dict: Dict[int, List[str]] = {}
+    
+    def _initialize_hash_ranges(self, dimensions: int):
+        if self.dimensions != dimensions:
+            self.dimensions = dimensions
+            self.hash_ranges = np.random.randn(self.num_hash_functions, dimensions)
     
     def _hash_vector(self, vector: List[float]) -> List[int]:
         vector_array = np.array(vector)
+        if self.hash_ranges is None or self.dimensions != len(vector):
+            self._initialize_hash_ranges(len(vector))
         projections = np.dot(self.hash_ranges, vector_array)
         return (projections > 0).astype(int).tolist()
     
