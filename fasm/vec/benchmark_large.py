@@ -45,24 +45,33 @@ def print_results(results: Dict):
     # Search performance comparison
     search_metrics = results["search_metrics"]
     search_data = [
-        ["Exact", f"{search_metrics.exact_time:.4f}s", "100%"],
-        ["Approximate", f"{search_metrics.approx_time:.4f}s", f"{search_metrics.recall_at_k:.2%}"],
-        ["LSH", f"{search_metrics.lsh_time:.4f}s", f"{search_metrics.recall_at_k:.2%}"]
+        ["Method", "Time", "Recall@k", "Speedup"],
+        ["Exact", f"{search_metrics.exact_time:.4f}s", "100%", "1.00x"],
+        ["Approximate", f"{search_metrics.approx_time:.4f}s", 
+         f"{search_metrics.recall_at_k:.2%}", 
+         f"{search_metrics.exact_time/search_metrics.approx_time:.2f}x"],
+        ["LSH", f"{search_metrics.lsh_time:.4f}s", 
+         f"{search_metrics.recall_at_k:.2%}",
+         f"{search_metrics.exact_time/search_metrics.lsh_time:.2f}x"]
     ]
     
     print("\nSearch Performance:")
-    print(tabulate(search_data, headers=["Method", "Time", "Recall@k"]))
+    print(tabulate(search_data, headers="firstrow"))
     
     print("\nMemory and Cache Metrics:")
     metrics = results["metrics"]
     memory_data = [
-        ["Total Memory", f"{search_metrics.memory_used:.2f} MB"],
-        ["Cache Size", f"{metrics.cache_size/1024/1024:.2f} MB"],
-        ["Cache Hit Ratio", f"{search_metrics.cache_hit_ratio:.2%}"],
-        ["Total Vectors", f"{metrics.total_vectors:,}"],
-        ["Memory per Vector", f"{search_metrics.memory_used/metrics.total_vectors:.2f} MB"]
+        ["Metric", "Value", "Per Vector"],
+        ["Total Memory", f"{search_metrics.memory_used:.2f} MB", 
+         f"{search_metrics.memory_used/metrics.total_vectors*1024:.2f} KB"],
+        ["Cache Size", f"{metrics.cache_size/1024/1024:.2f} MB",
+         f"{metrics.cache_size/metrics.total_vectors/1024:.2f} KB"],
+        ["Cache Hit Ratio", f"{search_metrics.cache_hit_ratio:.2%}", ""],
+        ["Total Vectors", f"{metrics.total_vectors:,}", ""],
+        ["Cache Efficiency", 
+         f"{metrics.cache_hits:,}/{metrics.cache_hits + metrics.cache_misses:,}", ""]
     ]
-    print(tabulate(memory_data, headers=["Metric", "Value"]))
+    print(tabulate(memory_data, headers="firstrow"))
 
 def benchmark_similarity_metrics(db: DuckDBVectorDatabase, query_vector: List[float], k: int):
     metrics = ["cosine", "euclidean", "dot_product"]
@@ -81,7 +90,7 @@ def benchmark_similarity_metrics(db: DuckDBVectorDatabase, query_vector: List[fl
     return results
 
 def plot_performance_comparison(sizes, times):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
     methods = ["exact", "approximate", "lsh"]
     
     # Search times
@@ -95,10 +104,30 @@ def plot_performance_comparison(sizes, times):
     
     # Memory usage
     ax2.plot(sizes, [t.get("memory_used", 0) for t in times], marker='o', label="Total Memory")
+    ax2.plot(sizes, [t.get("cache_size", 0)/1024/1024 for t in times], marker='s', label="Cache Size")
     ax2.set_xlabel("Number of Vectors")
     ax2.set_ylabel("Memory Usage (MB)")
     ax2.set_title("Memory Scaling")
+    ax2.legend()
     ax2.grid(True)
+    
+    # Speedup
+    speedups = []
+    for t in times:
+        exact_time = t["exact"]
+        speedup = {
+            "approximate": exact_time / t["approximate"] if t["approximate"] > 0 else 0,
+            "lsh": exact_time / t["lsh"] if t["lsh"] > 0 else 0
+        }
+        speedups.append(speedup)
+    
+    for method in ["approximate", "lsh"]:
+        ax3.plot(sizes, [s[method] for s in speedups], marker='o', label=method)
+    ax3.set_xlabel("Number of Vectors")
+    ax3.set_ylabel("Speedup vs Exact Search")
+    ax3.set_title("Search Method Speedup")
+    ax3.legend()
+    ax3.grid(True)
     
     plt.tight_layout()
     plt.savefig("search_performance.png")

@@ -254,7 +254,11 @@ class DuckDBVectorDatabase:
     def _process_partition(self, partition_vectors: List[Tuple[str, bytes, int]], query_vector: List[float]) -> List[Tuple[str, float]]:
         similarities = []
         for key, vector_data, dimensions in partition_vectors:
-            vector = self._deserialize_vector(vector_data, dimensions)
+            # Try cache first
+            vector = self._get_cached_vector(key)
+            if vector is None:
+                vector = self._deserialize_vector(vector_data, dimensions)
+                self._set_cached_vector(key, vector)
             similarity = self._calculate_similarity(query_vector, vector)
             similarities.append((key, similarity))
         return similarities
@@ -294,10 +298,10 @@ class DuckDBVectorDatabase:
 
     def lsh_search(self, query_vector: List[float], k: int) -> List[Tuple[str, float]]:
         # Get candidates from LSH with increased min_candidates
-        candidate_keys = self.lsh_index.query(query_vector, min_candidates=k * 10)
+        candidate_keys = self.lsh_index.query(query_vector, min_candidates=k * 20)  # Increased candidates
         if not candidate_keys or len(candidate_keys) < k:
             # Fallback to approximate search if too few candidates
-            return self.approximate_search(query_vector, k, self.chunk_size // 5)
+            return self.approximate_search(query_vector, k, self.chunk_size // 2)  # Increased sample size
         
         # Batch retrieve vectors for better performance
         placeholders = ','.join(['?' for _ in candidate_keys])
@@ -306,15 +310,18 @@ class DuckDBVectorDatabase:
             FROM vectors 
             WHERE key IN ({placeholders})
             LIMIT ?  -- Limit the number of vectors to process
-        """, [*candidate_keys, min(len(candidate_keys), k * 20)]).fetchall()
+        """, [*candidate_keys, min(len(candidate_keys), k * 40)]).fetchall()  # Increased limit
         
         # Calculate similarities in parallel
         similarities = []
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
             for key, vector_data, dimensions in vectors_data:
-                vector = self._deserialize_vector(vector_data, dimensions)
-                self._set_cached_vector(key, vector)
+                # Try cache first
+                vector = self._get_cached_vector(key)
+                if vector is None:
+                    vector = self._deserialize_vector(vector_data, dimensions)
+                    self._set_cached_vector(key, vector)
                 future = executor.submit(self._calculate_similarity, query_vector, vector)
                 futures.append((key, future))
             
@@ -367,12 +374,13 @@ class DuckDBVectorDatabase:
             JOIN partitions p ON v.partition_id = p.partition_id
             WHERE random() <= ? * (1.0 + LOG10(p.partition_size))
                   OR partition_size <= ?  -- Include all vectors from small partitions
+                  OR random() <= 0.1  -- Random sampling for diversity
             ORDER BY random()
             LIMIT ?
         """, [
-            sample_ratio * 3,  # Triple the sample ratio
-            k * 2,  # Small partition threshold
-            sample_size * 4  # Quadruple the sample size
+            sample_ratio * 4,  # Quadruple the sample ratio
+            k * 4,  # Increased small partition threshold
+            sample_size * 8  # Octupled the sample size
         ]).fetchall()
         
         # Process in parallel for better performance
@@ -380,8 +388,11 @@ class DuckDBVectorDatabase:
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
             for key, vector_data, dimensions in sampled_vectors:
-                vector = self._deserialize_vector(vector_data, dimensions)
-                self._set_cached_vector(key, vector)
+                # Try cache first
+                vector = self._get_cached_vector(key)
+                if vector is None:
+                    vector = self._deserialize_vector(vector_data, dimensions)
+                    self._set_cached_vector(key, vector)
                 future = executor.submit(self._calculate_similarity, query_vector, vector)
                 futures.append((key, future))
             
@@ -439,14 +450,14 @@ class DuckDBVectorDatabase:
         metrics = SearchMetrics()
         process = psutil.Process()
         
-        # Exact search
+        # Exact search first to establish ground truth
         start_time = time.time()
         exact_results = self._exact_search(query_vector, k)
         metrics.exact_time = time.time() - start_time
         
         # Approximate search
         start_time = time.time()
-        approx_results = self.approximate_search(query_vector, k, self.chunk_size // 10)
+        approx_results = self.approximate_search(query_vector, k, self.chunk_size // 5)  # Increased sample size
         metrics.approx_time = time.time() - start_time
         
         # LSH search
@@ -454,11 +465,10 @@ class DuckDBVectorDatabase:
         lsh_results = self.lsh_search(query_vector, k)
         metrics.lsh_time = time.time() - start_time
         
-        # Calculate recall for both approximate methods
-        metrics.recall_at_k = max(
-            self.calculate_recall(exact_results, approx_results, k),
-            self.calculate_recall(exact_results, lsh_results, k)
-        )
+        # Calculate recall for both methods separately
+        approx_recall = self.calculate_recall(exact_results, approx_results, k)
+        lsh_recall = self.calculate_recall(exact_results, lsh_results, k)
+        metrics.recall_at_k = max(approx_recall, lsh_recall)
         
         # Memory and cache metrics
         metrics.memory_used = process.memory_info().rss / 1024 / 1024
