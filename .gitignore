@@ -49,4 +49,4 @@ htmlcov/
 *.bak 
 
 # DuckDb
-vectors.duckdb
+*.duckdb
