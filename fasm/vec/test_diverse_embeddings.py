@@ -9,31 +9,58 @@ import seaborn as sns
 def generate_text_embeddings(num_vectors: int, dimensions: int = 768) -> List[Tuple[str, List[float]]]:
     """Simulate BERT-like text embeddings."""
     vectors = []
+    # Create clusters to simulate semantic similarity
+    num_clusters = 20
+    cluster_centers = np.random.normal(0, 1, (num_clusters, dimensions))
+    
     for i in range(num_vectors):
-        # BERT embeddings tend to be normally distributed
-        vector = list(np.random.normal(0, 0.1, dimensions))
+        # Select a random cluster
+        cluster_idx = i % num_clusters
+        # Generate vector near cluster center with some noise
+        noise = np.random.normal(0, 0.1, dimensions)
+        vector = list(cluster_centers[cluster_idx] + noise)
+        # Normalize the vector as BERT embeddings are usually normalized
+        vector = list(vector / np.linalg.norm(vector))
         vectors.append((f"text_{i}", vector))
     return vectors
 
 def generate_image_embeddings(num_vectors: int, dimensions: int = 2048) -> List[Tuple[str, List[float]]]:
     """Simulate ResNet-like image embeddings."""
     vectors = []
+    # Create feature clusters to simulate visual similarity
+    num_clusters = 15
+    cluster_centers = np.random.normal(0, 1, (num_clusters, dimensions))
+    
     for i in range(num_vectors):
-        # Image embeddings often have more pronounced features
-        vector = list(np.random.normal(0, 0.2, dimensions))
-        # Add some sparsity typical in image embeddings
-        vector = np.multiply(vector, np.random.binomial(1, 0.7, dimensions))
+        # Select a random cluster
+        cluster_idx = i % num_clusters
+        # Generate vector near cluster center with some noise
+        noise = np.random.normal(0, 0.2, dimensions)
+        vector = cluster_centers[cluster_idx] + noise
+        # Add sparsity typical in image embeddings
+        sparsity_mask = np.random.binomial(1, 0.7, dimensions)
+        vector = list(np.multiply(vector, sparsity_mask))
+        # Normalize the vector
+        vector = list(vector / np.linalg.norm(vector))
         vectors.append((f"img_{i}", vector))
     return vectors
 
 def generate_audio_embeddings(num_vectors: int, dimensions: int = 512) -> List[Tuple[str, List[float]]]:
     """Simulate audio embeddings (e.g., from wav2vec)."""
     vectors = []
+    # Create base patterns for temporal similarity
+    num_patterns = 10
+    base_patterns = [np.sin(np.linspace(0, 10 + p, dimensions)) for p in range(num_patterns)]
+    
     for i in range(num_vectors):
-        # Audio embeddings often have temporal patterns
-        base = np.sin(np.linspace(0, 10, dimensions))
+        # Select a base pattern
+        pattern_idx = i % num_patterns
+        base = base_patterns[pattern_idx]
+        # Add noise to create variations
         noise = np.random.normal(0, 0.1, dimensions)
-        vector = list(base + noise)
+        vector = base + noise
+        # Normalize the vector
+        vector = list(vector / np.linalg.norm(vector))
         vectors.append((f"audio_{i}", vector))
     return vectors
 
@@ -79,6 +106,10 @@ def test_embedding_type(db: DuckDBVectorDatabase, vectors: List[Tuple[str, List[
     # Insert vectors
     db.batch_insert(vectors)
     
+    # Normalize query vector
+    query_vector = np.array(query_vector)
+    query_vector = list(query_vector / np.linalg.norm(query_vector))
+    
     # Perform search with metrics
     metrics = db.search_with_metrics(query_vector, k)
     
@@ -88,15 +119,37 @@ def test_embedding_type(db: DuckDBVectorDatabase, vectors: List[Tuple[str, List[
     
     return metrics
 
+def visualize_embeddings(vectors: List[Tuple[str, List[float]]], title: str):
+    """Visualize embeddings using t-SNE."""
+    # Extract vectors
+    vector_data = np.array([v[1] for v in vectors])
+    
+    # Apply t-SNE
+    tsne = TSNE(n_components=2, random_state=42)
+    embedded = tsne.fit_transform(vector_data[:1000])  # Use subset for speed
+    
+    # Plot
+    plt.figure(figsize=(10, 8))
+    plt.scatter(embedded[:, 0], embedded[:, 1], alpha=0.5)
+    plt.title(f't-SNE visualization of {title}')
+    plt.savefig(f'tsne_{title}.png')
+    plt.close()
+    
+    # Calculate and print clustering metrics
+    distances = np.linalg.norm(vector_data[:1000] - vector_data[:1000].mean(axis=0), axis=1)
+    print(f"\n{title} Statistics:")
+    print(f"Mean L2 distance from center: {distances.mean():.4f}")
+    print(f"Std L2 distance from center: {distances.std():.4f}")
+
 def main():
     # Test parameters
     num_vectors = 10000
     k = 5
     
-    # Initialize database
+    # Initialize database with smaller chunk size for better distribution
     db = DuckDBVectorDatabase(
         ":memory:",
-        chunk_size=1000,
+        chunk_size=500,  # Reduced chunk size for better distribution
         max_cache_size=1024 * 1024 * 1024  # 1GB cache
     )
     
@@ -105,10 +158,16 @@ def main():
     image_vectors = generate_image_embeddings(num_vectors)
     audio_vectors = generate_audio_embeddings(num_vectors)
     
-    # Generate query vectors for each type
-    text_query = list(np.random.normal(0, 0.1, 768))
-    image_query = list(np.random.normal(0, 0.2, 2048))
-    audio_query = list(np.random.normal(0, 0.1, 512))
+    # Visualize embeddings
+    print("\nGenerating embedding visualizations...")
+    visualize_embeddings(text_vectors, "text_embeddings")
+    visualize_embeddings(image_vectors, "image_embeddings")
+    visualize_embeddings(audio_vectors, "audio_embeddings")
+    
+    # Generate query vectors for each type (using existing vectors to ensure retrievability)
+    text_query = text_vectors[0][1]  # Use first vector as query
+    image_query = image_vectors[0][1]
+    audio_query = audio_vectors[0][1]
     
     # Test each embedding type
     print("\nTesting different embedding types...")
