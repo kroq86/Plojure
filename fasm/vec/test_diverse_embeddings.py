@@ -9,16 +9,23 @@ import seaborn as sns
 def generate_text_embeddings(num_vectors: int, dimensions: int = 768) -> List[Tuple[str, List[float]]]:
     """Simulate BERT-like text embeddings."""
     vectors = []
-    # Create more distinct clusters
-    num_clusters = 4  # Increased number of clusters
-    cluster_centers = np.random.normal(0, 2, (num_clusters, dimensions))  # Increased variance
-    # Normalize cluster centers
-    cluster_centers = cluster_centers / np.linalg.norm(cluster_centers, axis=1)[:, np.newaxis]
+    num_clusters = 4
+    # Generate more separated cluster centers
+    cluster_centers = []
+    for i in range(num_clusters):
+        # Create orthogonal-like centers
+        center = np.random.normal(0, 1, dimensions)
+        # Make it more orthogonal to previous centers
+        for prev_center in cluster_centers:
+            center = center - np.dot(center, prev_center) * prev_center
+        center = center / np.linalg.norm(center)
+        cluster_centers.append(center)
+    cluster_centers = np.array(cluster_centers)
     
     cluster_vectors = {i: [] for i in range(num_clusters)}
     for i in range(num_vectors):
         cluster_idx = i % num_clusters
-        noise = np.random.normal(0, 0.02, dimensions)  # Reduced noise
+        noise = np.random.normal(0, 0.01, dimensions)  # Reduced noise further
         vector = cluster_centers[cluster_idx] + noise
         vector = vector / np.linalg.norm(vector)
         vectors.append((f"text_{i}", list(vector)))
@@ -28,18 +35,29 @@ def generate_text_embeddings(num_vectors: int, dimensions: int = 768) -> List[Tu
 def generate_image_embeddings(num_vectors: int, dimensions: int = 2048) -> List[Tuple[str, List[float]]]:
     """Simulate ResNet-like image embeddings."""
     vectors = []
-    num_clusters = 4  # Increased number of clusters
-    cluster_centers = np.random.normal(0, 2, (num_clusters, dimensions))  # Increased variance
-    cluster_centers = cluster_centers / np.linalg.norm(cluster_centers, axis=1)[:, np.newaxis]
+    num_clusters = 4
+    # Generate sparse orthogonal-like centers
+    cluster_centers = []
+    for i in range(num_clusters):
+        # Create sparse orthogonal-like centers
+        center = np.zeros(dimensions)
+        active_dims = np.random.choice(dimensions, size=dimensions//4, replace=False)
+        center[active_dims] = np.random.normal(0, 1, dimensions//4)
+        # Make it more orthogonal to previous centers
+        for prev_center in cluster_centers:
+            center = center - np.dot(center, prev_center) * prev_center
+        center = center / np.linalg.norm(center)
+        cluster_centers.append(center)
+    cluster_centers = np.array(cluster_centers)
     
     cluster_vectors = {i: [] for i in range(num_clusters)}
     for i in range(num_vectors):
         cluster_idx = i % num_clusters
-        noise = np.random.normal(0, 0.02, dimensions)  # Reduced noise
+        noise = np.random.normal(0, 0.01, dimensions)  # Reduced noise
         vector = cluster_centers[cluster_idx] + noise
-        sparsity_mask = np.random.binomial(1, 0.9, dimensions)  # Increased density
-        vector = np.multiply(vector, sparsity_mask)
-        vector = vector / (np.linalg.norm(vector) + 1e-8)  # Added epsilon for numerical stability
+        # Maintain sparsity pattern of cluster center
+        vector = vector * (cluster_centers[cluster_idx] != 0)
+        vector = vector / (np.linalg.norm(vector) + 1e-8)
         vectors.append((f"img_{i}", list(vector)))
         cluster_vectors[cluster_idx].append((f"img_{i}", list(vector)))
     return vectors, cluster_vectors
@@ -160,18 +178,22 @@ def test_embedding_type(db: DuckDBVectorDatabase, vectors: List[Tuple[str, List[
     
     # Test with multiple query vectors from different clusters
     total_metrics = []
-    num_test_queries = min(5, len(cluster_vectors))  # Test with up to 5 queries
+    num_test_queries = min(5, len(cluster_vectors))
     
     for cluster_idx in range(num_test_queries):
         if cluster_idx >= len(cluster_vectors):
             break
         cluster = cluster_vectors[cluster_idx]
-        if not cluster:
+        if not cluster or len(cluster) < k:
             continue
             
-        # Use first vector from each cluster as query
-        query_vector = np.array(cluster[0][1])
-        metrics = db.search_with_metrics(list(query_vector), k)
+        # Use center vector from each cluster as query
+        cluster_vectors_array = np.array([v[1] for v in cluster])
+        cluster_center = np.mean(cluster_vectors_array, axis=0)
+        cluster_center = cluster_center / np.linalg.norm(cluster_center)
+        
+        # Find k-1 nearest neighbors (excluding the query vector itself)
+        metrics = db.search_with_metrics(list(cluster_center), k)
         total_metrics.append(metrics)
     
     # Average the metrics
@@ -235,13 +257,13 @@ def visualize_embeddings(vectors: List[Tuple[str, List[float]]], title: str):
 def main():
     # Test parameters
     num_vectors = 1000
-    k = 5  # Increased k for better recall evaluation
+    k = 10  # Increased k for better recall evaluation
     
-    # Initialize database with smaller chunk size for better distribution
+    # Initialize database with optimized parameters
     db = DuckDBVectorDatabase(
         ":memory:",
-        chunk_size=100,  # Increased chunk size
-        max_cache_size=1024 * 1024 * 1024
+        chunk_size=200,  # Increased chunk size for better batching
+        max_cache_size=2 * 1024 * 1024 * 1024  # Increased cache size
     )
     
     # Generate different types of embeddings
