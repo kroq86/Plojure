@@ -45,24 +45,24 @@ def print_results(results: Dict):
     # Search performance comparison
     search_metrics = results["search_metrics"]
     search_data = [
-        ["exact", f"{search_metrics.exact_time:.4f}s"],
-        ["approximate", f"{search_metrics.approx_time:.4f}s"],
-        ["lsh", f"{search_metrics.lsh_time:.4f}s"]
+        ["Exact", f"{search_metrics.exact_time:.4f}s", "100%"],
+        ["Approximate", f"{search_metrics.approx_time:.4f}s", f"{search_metrics.recall_at_k:.2%}"],
+        ["LSH", f"{search_metrics.lsh_time:.4f}s", f"{search_metrics.recall_at_k:.2%}"]
     ]
     
     print("\nSearch Performance:")
-    print(tabulate(search_data, headers=["Method", "Time"]))
+    print(tabulate(search_data, headers=["Method", "Time", "Recall@k"]))
     
-    print("\nSearch Quality:")
-    print(f"Recall@k: {search_metrics.recall_at_k:.2%}")
-    print(f"Cache hit ratio: {search_metrics.cache_hit_ratio:.2%}")
-    
-    # Memory metrics
+    print("\nMemory and Cache Metrics:")
     metrics = results["metrics"]
-    print("\nMemory Metrics:")
-    print(f"Total memory usage: {search_metrics.memory_used:.2f} MB")
-    print(f"Cache size: {metrics.cache_size/1024/1024:.2f} MB")
-    print(f"Vectors in database: {metrics.total_vectors}")
+    memory_data = [
+        ["Total Memory", f"{search_metrics.memory_used:.2f} MB"],
+        ["Cache Size", f"{metrics.cache_size/1024/1024:.2f} MB"],
+        ["Cache Hit Ratio", f"{search_metrics.cache_hit_ratio:.2%}"],
+        ["Total Vectors", f"{metrics.total_vectors:,}"],
+        ["Memory per Vector", f"{search_metrics.memory_used/metrics.total_vectors:.2f} MB"]
+    ]
+    print(tabulate(memory_data, headers=["Metric", "Value"]))
 
 def benchmark_similarity_metrics(db: DuckDBVectorDatabase, query_vector: List[float], k: int):
     metrics = ["cosine", "euclidean", "dot_product"]
@@ -81,16 +81,26 @@ def benchmark_similarity_metrics(db: DuckDBVectorDatabase, query_vector: List[fl
     return results
 
 def plot_performance_comparison(sizes, times):
-    plt.figure(figsize=(10, 6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     methods = ["exact", "approximate", "lsh"]
-    for method in methods:
-        plt.plot(sizes, [t[method] for t in times], marker='o', label=method)
     
-    plt.xlabel("Number of Vectors")
-    plt.ylabel("Search Time (seconds)")
-    plt.title("Search Performance Comparison")
-    plt.legend()
-    plt.grid(True)
+    # Search times
+    for method in methods:
+        ax1.plot(sizes, [t[method] for t in times], marker='o', label=method)
+    ax1.set_xlabel("Number of Vectors")
+    ax1.set_ylabel("Search Time (seconds)")
+    ax1.set_title("Search Time Comparison")
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Memory usage
+    ax2.plot(sizes, [t.get("memory_used", 0) for t in times], marker='o', label="Total Memory")
+    ax2.set_xlabel("Number of Vectors")
+    ax2.set_ylabel("Memory Usage (MB)")
+    ax2.set_title("Memory Scaling")
+    ax2.grid(True)
+    
+    plt.tight_layout()
     plt.savefig("search_performance.png")
     plt.close()
 

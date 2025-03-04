@@ -120,15 +120,17 @@ class DuckDBVectorDatabase:
         self.mylib.py_vector_norm.restype = c_double
 
     def _initialize_db(self):
+        # Create table first
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS vectors (
                 key VARCHAR PRIMARY KEY,
                 vector BLOB,
                 dimensions INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                partition_id INTEGER
+                partition_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Then create indices
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_vectors_key ON vectors(key)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_vectors_partition ON vectors(partition_id)")
 
@@ -285,13 +287,32 @@ class DuckDBVectorDatabase:
         return all_similarities[:k]
 
     def lsh_search(self, query_vector: List[float], k: int) -> List[Tuple[str, float]]:
+        # Get candidates from LSH
         candidate_keys = self.lsh_index.query(query_vector)
-        similarities = []
+        if not candidate_keys:
+            # Fallback to approximate search if no candidates found
+            return self.approximate_search(query_vector, k, self.chunk_size // 10)
         
-        for key in candidate_keys:
-            vector = self.retrieve(key)
-            if vector is not None:
-                similarity = self._calculate_similarity(query_vector, vector)
+        # Batch retrieve vectors for better performance
+        placeholders = ','.join(['?' for _ in candidate_keys])
+        vectors_data = self.conn.execute(f"""
+            SELECT key, vector, dimensions 
+            FROM vectors 
+            WHERE key IN ({placeholders})
+        """, candidate_keys).fetchall()
+        
+        # Calculate similarities in parallel
+        similarities = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = []
+            for key, vector_data, dimensions in vectors_data:
+                vector = self._deserialize_vector(vector_data, dimensions)
+                self._set_cached_vector(key, vector)
+                future = executor.submit(self._calculate_similarity, query_vector, vector)
+                futures.append((key, future))
+            
+            for key, future in futures:
+                similarity = future.result()
                 similarities.append((key, similarity))
         
         similarities.sort(key=lambda x: x[1], reverse=True)
@@ -326,7 +347,7 @@ class DuckDBVectorDatabase:
         total_vectors = self.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
         sample_ratio = min(1.0, sample_size / total_vectors)
         
-        # Stratified sampling across partitions
+        # Improved stratified sampling across partitions
         sampled_vectors = self.conn.execute("""
             WITH partitions AS (
                 SELECT DISTINCT partition_id,
@@ -339,9 +360,22 @@ class DuckDBVectorDatabase:
             WHERE random() <= ? * (1.0 + LOG(p.partition_size))
             ORDER BY random()
             LIMIT ?
-        """, [sample_ratio, sample_size]).fetchall()
+        """, [sample_ratio * 2, sample_size * 2]).fetchall()  # Double the sample size for better recall
         
-        similarities = self._process_partition(sampled_vectors, query_vector)
+        # Process in parallel for better performance
+        similarities = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = []
+            for key, vector_data, dimensions in sampled_vectors:
+                vector = self._deserialize_vector(vector_data, dimensions)
+                self._set_cached_vector(key, vector)
+                future = executor.submit(self._calculate_similarity, query_vector, vector)
+                futures.append((key, future))
+            
+            for key, future in futures:
+                similarity = future.result()
+                similarities.append((key, similarity))
+        
         similarities.sort(key=lambda x: x[1], reverse=True)
         return similarities[:k]
 
@@ -373,9 +407,20 @@ class DuckDBVectorDatabase:
 
     def calculate_recall(self, exact_results: List[Tuple[str, float]], 
                         approx_results: List[Tuple[str, float]], k: int) -> float:
+        if not exact_results or not approx_results:
+            return 0.0
+            
+        # Get top-k results
         exact_keys = set(key for key, _ in exact_results[:k])
         approx_keys = set(key for key, _ in approx_results[:k])
-        return len(exact_keys.intersection(approx_keys)) / k if k > 0 else 0.0
+        
+        # Calculate intersection
+        common_keys = exact_keys.intersection(approx_keys)
+        
+        # Calculate recall
+        recall = len(common_keys) / min(k, len(exact_keys)) if exact_keys else 0.0
+        
+        return recall
 
     def search_with_metrics(self, query_vector: List[float], k: int) -> SearchMetrics:
         metrics = SearchMetrics()
