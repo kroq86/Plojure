@@ -5,6 +5,17 @@ public binary_search
 binary_search:
     push rbp
     mov rbp, rsp
+    ;   1st parameter: RDI
+    ;   2nd parameter: RSI
+    ;   3rd parameter: RDX
+    ;   4th parameter: RCX
+    ;   5th parameter: R8
+    ;   6th parameter: R9
+
+    ;   int *arr   <-- RDI (Pointer to the beginning of the integer array)
+    ;   size_t size  <-- RSI (Number of elements in the array)
+    ;   int value  <-- RDX (Value to search for)
+
     mov r8, 0                     ; left = 0
     mov r9, rsi                   ; right = size
 .loop:
