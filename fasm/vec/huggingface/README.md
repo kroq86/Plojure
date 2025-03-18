@@ -116,4 +116,4 @@ This project builds on research in vector databases, nearest neighbor search alg
 
 ---
 
-Created by [Kirill Ostapenko](https://github.com/kroq-gar78) 
+Created by [Kirill Ostapenko](https://github.com/kroq86) 
