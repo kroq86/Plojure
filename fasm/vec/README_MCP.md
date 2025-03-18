@@ -1,76 +1,118 @@
-# MCP Vector Database Integration
+# DuckDBVectorDatabase MCP Integration
 
-This integration allows you to expose your DuckDBVectorDatabase through the Model Context Protocol (MCP), making it available to LLM applications like Claude Desktop.
+This document describes the integration of DuckDBVectorDatabase with the Model Context Protocol (MCP), allowing you to use the vector database capabilities with Claude and other MCP-compatible systems.
 
-## What is MCP?
+## Components
 
-The [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) is an open protocol that enables seamless integration between LLM applications and external data sources and tools. It standardizes how applications provide context to LLMs.
+The MCP integration consists of several key components:
 
-## Files in this Integration
+1. **`mcp_vector_server.py`**: The MCP server that exposes DuckDBVectorDatabase functionality through the Model Context Protocol.
+2. **`minimal_mcp_client.py`**: A minimal client demonstrating basic vector insertion.
+3. **`demo_mcp_vector.py`**: A comprehensive demo showcasing all available vector operations.
+4. **`duckdb_vec.py`**: The core vector database implementation using DuckDB.
 
-- `mcp_vector_server.py` - The MCP server that wraps DuckDBVectorDatabase
-- `demo_mcp_vector.py` - A demonstration script showing how to use the MCP server
+## Quick Start
 
-## Features
+### 1. Test with the Minimal Client
 
-This MCP server exposes the following capabilities:
+Run the minimal client to verify basic functionality:
 
-### Tools (for LLMs to use)
-- `vector_search` - Search for similar vectors in the database
-- `insert_vector` - Insert a vector into the database
-- `delete_vector` - Delete a vector from the database
-- `get_metrics` - Get performance metrics from the database
+```bash
+python minimal_mcp_client.py
+```
 
-### Resources (for context)
-- `vector://{key}` - Get specific vector data by key
-- `metrics://performance` - Get database performance metrics
+If successful, you should see a message confirming that a test vector was inserted.
 
-### Prompts (for users)
-- `search_vectors_prompt` - Creates a prompt template for vector search
+### 2. Explore Full Functionality
 
-## Getting Started
+Run the comprehensive demo to see all available operations:
 
-1. Install the MCP SDK:
-   ```
-   pip install mcp
-   ```
+```bash
+python demo_mcp_vector.py
+```
 
-2. Run the demo to see it in action:
-   ```
-   python demo_mcp_vector.py
-   ```
+This demo showcases:
+- Inserting concept vectors
+- Retrieving database metrics
+- Fetching vector resources by key
+- Performing vector similarity searches
+- Deleting vectors
 
-3. Use with Claude Desktop:
-   ```
-   mcp install /path/to/mcp_vector_server.py
-   ```
+### 3. Install in Claude Desktop
 
-## Integration with Applications
+Install the MCP server in Claude Desktop:
 
-This MCP server can be used with any MCP-compatible client, including:
+```bash
+# Install MCP CLI tools if needed
+pip install "mcp[cli]"
 
-- Claude Desktop
-- Custom applications using the MCP client SDK
-- Development environments like Zed, Replit, etc.
+# Install the server
+mcp install mcp_vector_server.py --name "Vector Database"
+```
 
-## Example Use Case: Semantic Search
+## Available MCP Tools
 
-1. Store document embeddings in the vector database
-2. Connect Claude Desktop to your MCP server
-3. Ask Claude to find semantically similar documents
-4. Claude will use the vector_search tool to find matches
+The server exposes the following tools:
 
-## Extending the Integration
+1. **`insert_vector`**: Insert a vector with a key
+   - Parameters: `key` (string), `vector` (list of floats)
+   - Returns: Confirmation message
 
-You can extend this integration by:
+2. **`delete_vector`**: Delete a vector by key
+   - Parameters: `key` (string)
+   - Returns: Confirmation message
 
-1. Adding more tools for additional vector operations
-2. Supporting more complex vector operations (clustering, etc.)
-3. Creating specialized prompts for specific use cases
-4. Adding authentication and access control
+3. **`get_vector`**: Retrieve a vector by key
+   - Parameters: `key` (string)
+   - Returns: Vector data
 
-## Requirements
+4. **`vector_search`**: Search for similar vectors
+   - Parameters: 
+     - `query_vector` (list of floats) or `query_key` (string)
+     - `method` (string): "exact", "hnsw", or "random"
+     - `similarity` (string): "cosine", "euclidean", or "dot_product"
+     - `k` (int): number of results
+   - Returns: Similar vectors with similarity scores
 
-- Python 3.7+
-- MCP SDK (`pip install mcp`)
-- NumPy 
+5. **`get_metrics`**: Get database performance metrics
+   - Returns: Current metrics
+
+## Advanced Configuration
+
+The MCP server supports several environment variables:
+
+- `VECTOR_DB_PATH`: Path to a persistent database file (default: in-memory)
+- `INDEX_METHOD`: Default indexing method (default: "hnsw")
+- `DEFAULT_SIMILARITY`: Default similarity metric (default: "cosine")
+- `VECTOR_DIMENSION`: Default dimension for vectors (default: 1536)
+
+Set these when installing the server:
+
+```bash
+mcp install mcp_vector_server.py -e VECTOR_DB_PATH=/path/to/vectors.db
+```
+
+## Development Notes
+
+### Contributing
+
+To extend the functionality:
+
+1. Update `duckdb_vec.py` with new database features
+2. Add corresponding methods to `mcp_vector_server.py`
+3. Update the demo scripts to showcase new functionality
+4. Update documentation
+
+### Troubleshooting MCP Integration
+
+- Ensure proper error handling of `CallToolResult` objects
+- Check the type of objects returned by MCP tools
+- Verify vector formats are consistent (normalized if using cosine similarity)
+- Use proper URL encoding for keys with special characters
+
+### Performance Considerations
+
+For large vector collections:
+- Use HNSW indexing for faster approximate search
+- Consider using a persistent database file
+- Pre-normalize vectors if using cosine similarity frequently 

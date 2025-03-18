@@ -29,16 +29,16 @@ except ImportError:
     sys.exit(1)
 
 SAMPLE_CONCEPTS = [
-    "artificial intelligence",
-    "machine learning",
-    "neural networks", 
-    "computer vision",
-    "natural language processing",
-    "reinforcement learning",
-    "deep learning",
+    "artificial_intelligence",
+    "machine_learning",
+    "neural_networks", 
+    "computer_vision",
+    "natural_language_processing",
+    "reinforcement_learning",
+    "deep_learning",
     "robotics",
-    "data science",
-    "big data"
+    "data_science",
+    "big_data"
 ]
 
 SERVER_SCRIPT = Path(__file__).parent / "mcp_vector_server.py"
@@ -51,6 +51,14 @@ def generate_random_vector(dim: int = 10) -> List[float]:
 def create_concept_vectors(concepts: List[str], dim: int = 10) -> Dict[str, List[float]]:
     """Create random vectors for each concept (in a real app, these would be meaningful embeddings)"""
     return {f"concept:{concept}": generate_random_vector(dim) for concept in concepts}
+
+def extract_text_from_tool_result(result):
+    """Extract text content from a CallToolResult object"""
+    if hasattr(result, 'content') and result.content:
+        for content_item in result.content:
+            if hasattr(content_item, 'text') and content_item.text:
+                return content_item.text
+    return None
 
 async def run_mcp_client():
     """Run the MCP client to interact with the vector database server"""
@@ -74,18 +82,9 @@ async def run_mcp_client():
             print("\n--- Available Tools ---")
             try:
                 tools = await session.list_tools()
-                print(f"Tools object type: {type(tools)}")
-                print(f"Tools object structure: {tools}")
-                
-                # Try to access tools as attributes or properties
                 if hasattr(tools, 'tools'):
                     for tool in tools.tools:
-                        print(f"Tool: {tool}")
-                elif hasattr(tools, 'items'):
-                    for name, description in tools.items():
-                        print(f"Tool: {name} - {description}")
-                else:
-                    print(f"Could not parse tools: {tools}")
+                        print(f"Tool: {tool.name} - {tool.description}")
             except Exception as e:
                 print(f"Error listing tools: {str(e)}")
             
@@ -94,27 +93,41 @@ async def run_mcp_client():
             for key, vector in vectors.items():
                 try:
                     result = await session.call_tool("insert_vector", {"key": key, "vector": vector})
-                    result_json = json.loads(result)
-                    print(f"Inserted {key}: {result_json.get('status', 'error')}")
+                    text_content = extract_text_from_tool_result(result)
+                    if text_content:
+                        result_json = json.loads(text_content)
+                        print(f"Inserted {key}: {result_json.get('status', 'error')}")
+                    else:
+                        print(f"Inserted {key}: No text content in response")
                 except Exception as e:
                     print(f"Error inserting {key}: {str(e)}")
             
             print("\n--- Database Metrics ---")
             try:
                 metrics_result = await session.call_tool("get_metrics", {})
-                metrics = json.loads(metrics_result)
-                print(f"Total vectors: {metrics.get('total_vectors', 'N/A')}")
-                print(f"Memory usage: {metrics.get('memory_usage_mb', 'N/A')} MB")
+                text_content = extract_text_from_tool_result(metrics_result)
+                if text_content:
+                    metrics = json.loads(text_content)
+                    print(f"Total vectors: {metrics.get('total_vectors', 'N/A')}")
+                    print(f"Memory usage: {metrics.get('memory_usage_mb', 'N/A')} MB")
+                else:
+                    print("No metrics text content in response")
             except Exception as e:
                 print(f"Error getting metrics: {str(e)}")
             
             print("\n--- Fetching Vector Resource ---")
             try:
                 sample_key = f"concept:{SAMPLE_CONCEPTS[0]}"
-                vector_resource, _ = await session.read_resource(f"vector://{sample_key}")
-                vector_data = json.loads(vector_resource)
-                print(f"Retrieved vector for '{sample_key}':")
-                print(f"Dimensions: {vector_data.get('dimensions', 'N/A')}")
+                # URL encode the key to make it a valid URL
+                safe_key = sample_key.replace(":", "%3A")
+                vector_resource = await session.read_resource(f"vector://{safe_key}")
+                if hasattr(vector_resource, 'content'):
+                    content_text = vector_resource.content
+                    vector_data = json.loads(content_text)
+                    print(f"Retrieved vector for '{sample_key}':")
+                    print(f"Dimensions: {vector_data.get('dimensions', 'N/A')}")
+                else:
+                    print(f"Resource has no content attribute: {vector_resource}")
             except Exception as e:
                 print(f"Error fetching vector: {str(e)}")
             
@@ -125,36 +138,34 @@ async def run_mcp_client():
                     "vector_search", 
                     {"query_vector": query_vector, "k": 3, "method": "exact"}
                 )
-                search_data = json.loads(search_result)
-                
-                print("Search results:")
-                for item in search_data.get("results", []):
-                    print(f"Key: {item.get('key')}, Similarity: {item.get('similarity'):.4f}")
+                text_content = extract_text_from_tool_result(search_result)
+                if text_content:
+                    search_data = json.loads(text_content)
+                    
+                    print("Search results:")
+                    for item in search_data.get("results", []):
+                        print(f"Key: {item.get('key')}, Similarity: {item.get('similarity'):.4f}")
+                else:
+                    print("No search results text content in response")
             except Exception as e:
                 print(f"Error searching vectors: {str(e)}")
             
             print("\n--- Performance Metrics Resource ---")
             try:
-                metrics_resource, _ = await session.read_resource("metrics://performance")
-                print(metrics_resource)
+                metrics_resource = await session.read_resource("metrics://performance")
+                if hasattr(metrics_resource, 'content'):
+                    print(metrics_resource.content)
+                else:
+                    print(f"Resource has no content attribute: {metrics_resource}")
             except Exception as e:
                 print(f"Error getting performance metrics: {str(e)}")
             
             print("\n--- Available Prompts ---")
             try:
                 prompts = await session.list_prompts()
-                print(f"Prompts object type: {type(prompts)}")
-                print(f"Prompts object structure: {prompts}")
-                
-                # Try to access prompts as attributes or properties
                 if hasattr(prompts, 'prompts'):
                     for prompt in prompts.prompts:
-                        print(f"Prompt: {prompt}")
-                elif hasattr(prompts, 'items'):
-                    for name, description in prompts.items():
-                        print(f"Prompt: {name} - {description}")
-                else:
-                    print(f"Could not parse prompts: {prompts}")
+                        print(f"Prompt: {prompt.name} - {prompt.description}")
             except Exception as e:
                 print(f"Error listing prompts: {str(e)}")
             
@@ -162,8 +173,12 @@ async def run_mcp_client():
             try:
                 delete_key = f"concept:{SAMPLE_CONCEPTS[-1]}"
                 delete_result = await session.call_tool("delete_vector", {"key": delete_key})
-                delete_data = json.loads(delete_result)
-                print(f"Deleted '{delete_key}': {delete_data.get('status', 'error')}")
+                text_content = extract_text_from_tool_result(delete_result)
+                if text_content:
+                    delete_data = json.loads(text_content)
+                    print(f"Deleted '{delete_key}': {delete_data.get('status', 'error')}")
+                else:
+                    print(f"Deleted '{delete_key}': No text content in response")
             except Exception as e:
                 print(f"Error deleting vector: {str(e)}")
             
