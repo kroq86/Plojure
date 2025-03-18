@@ -174,16 +174,16 @@ class MCPVectorDatabaseServer:
             3. Analyze and explain the results
             """
     
-    def start(self):
-        self.mcp.start()
+    def get_server(self):
+        """Return the FastMCP server instance"""
+        return self.mcp
 
 
-def main():
-    db_path = os.environ.get("VECTOR_DB_PATH", ":memory:")
-    
-    server = MCPVectorDatabaseServer(db_path)
-    server.start()
+# Create a global server instance
+db_path = os.environ.get("VECTOR_DB_PATH", ":memory:")
+server = MCPVectorDatabaseServer(db_path)
+mcp = server.get_server()  # This is what the MCP client will look for
 
-
+# If run directly
 if __name__ == "__main__":
-    main() 
+    mcp.run()  # Use run() instead of start() 

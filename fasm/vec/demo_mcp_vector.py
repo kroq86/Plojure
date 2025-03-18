@@ -16,6 +16,7 @@ import json
 import random
 import numpy as np
 import subprocess
+import shlex
 from typing import List, Dict, Any
 import asyncio
 from pathlib import Path
@@ -53,68 +54,118 @@ def create_concept_vectors(concepts: List[str], dim: int = 10) -> Dict[str, List
 
 async def run_mcp_client():
     """Run the MCP client to interact with the vector database server"""
+    # Use sys.executable to get the current Python interpreter path
+    python_path = sys.executable
+    
+    # Create server parameters with command and args separated
     server_params = StdioServerParameters(
-        cmd=["python", str(SERVER_SCRIPT)],
+        command=python_path,
+        args=[str(SERVER_SCRIPT)],
         env={"VECTOR_DB_PATH": ":memory:"}
     )
     
     print("Starting MCP client session...")
+    print(f"Running: {python_path} {SERVER_SCRIPT}")
     
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             
             print("\n--- Available Tools ---")
-            tools = await session.list_tools()
-            for tool in tools:
-                print(f"Tool: {tool.name} - {tool.description}")
+            try:
+                tools = await session.list_tools()
+                print(f"Tools object type: {type(tools)}")
+                print(f"Tools object structure: {tools}")
+                
+                # Try to access tools as attributes or properties
+                if hasattr(tools, 'tools'):
+                    for tool in tools.tools:
+                        print(f"Tool: {tool}")
+                elif hasattr(tools, 'items'):
+                    for name, description in tools.items():
+                        print(f"Tool: {name} - {description}")
+                else:
+                    print(f"Could not parse tools: {tools}")
+            except Exception as e:
+                print(f"Error listing tools: {str(e)}")
             
             print("\n--- Creating Test Vectors ---")
             vectors = create_concept_vectors(SAMPLE_CONCEPTS)
             for key, vector in vectors.items():
-                result = await session.call_tool("insert_vector", {"key": key, "vector": vector})
-                result_json = json.loads(result)
-                print(f"Inserted {key}: {result_json.get('status', 'error')}")
+                try:
+                    result = await session.call_tool("insert_vector", {"key": key, "vector": vector})
+                    result_json = json.loads(result)
+                    print(f"Inserted {key}: {result_json.get('status', 'error')}")
+                except Exception as e:
+                    print(f"Error inserting {key}: {str(e)}")
             
             print("\n--- Database Metrics ---")
-            metrics_result = await session.call_tool("get_metrics", {})
-            metrics = json.loads(metrics_result)
-            print(f"Total vectors: {metrics.get('total_vectors', 'N/A')}")
-            print(f"Memory usage: {metrics.get('memory_usage_mb', 'N/A')} MB")
+            try:
+                metrics_result = await session.call_tool("get_metrics", {})
+                metrics = json.loads(metrics_result)
+                print(f"Total vectors: {metrics.get('total_vectors', 'N/A')}")
+                print(f"Memory usage: {metrics.get('memory_usage_mb', 'N/A')} MB")
+            except Exception as e:
+                print(f"Error getting metrics: {str(e)}")
             
             print("\n--- Fetching Vector Resource ---")
-            sample_key = f"concept:{SAMPLE_CONCEPTS[0]}"
-            vector_resource, _ = await session.read_resource(f"vector://{sample_key}")
-            vector_data = json.loads(vector_resource)
-            print(f"Retrieved vector for '{sample_key}':")
-            print(f"Dimensions: {vector_data.get('dimensions', 'N/A')}")
+            try:
+                sample_key = f"concept:{SAMPLE_CONCEPTS[0]}"
+                vector_resource, _ = await session.read_resource(f"vector://{sample_key}")
+                vector_data = json.loads(vector_resource)
+                print(f"Retrieved vector for '{sample_key}':")
+                print(f"Dimensions: {vector_data.get('dimensions', 'N/A')}")
+            except Exception as e:
+                print(f"Error fetching vector: {str(e)}")
             
             print("\n--- Performing Vector Search ---")
-            query_vector = generate_random_vector()
-            search_result = await session.call_tool(
-                "vector_search", 
-                {"query_vector": query_vector, "k": 3, "method": "exact"}
-            )
-            search_data = json.loads(search_result)
-            
-            print("Search results:")
-            for item in search_data.get("results", []):
-                print(f"Key: {item.get('key')}, Similarity: {item.get('similarity'):.4f}")
+            try:
+                query_vector = generate_random_vector()
+                search_result = await session.call_tool(
+                    "vector_search", 
+                    {"query_vector": query_vector, "k": 3, "method": "exact"}
+                )
+                search_data = json.loads(search_result)
+                
+                print("Search results:")
+                for item in search_data.get("results", []):
+                    print(f"Key: {item.get('key')}, Similarity: {item.get('similarity'):.4f}")
+            except Exception as e:
+                print(f"Error searching vectors: {str(e)}")
             
             print("\n--- Performance Metrics Resource ---")
-            metrics_resource, _ = await session.read_resource("metrics://performance")
-            print(metrics_resource)
+            try:
+                metrics_resource, _ = await session.read_resource("metrics://performance")
+                print(metrics_resource)
+            except Exception as e:
+                print(f"Error getting performance metrics: {str(e)}")
             
             print("\n--- Available Prompts ---")
-            prompts = await session.list_prompts()
-            for prompt in prompts:
-                print(f"Prompt: {prompt.name} - {prompt.description}")
+            try:
+                prompts = await session.list_prompts()
+                print(f"Prompts object type: {type(prompts)}")
+                print(f"Prompts object structure: {prompts}")
+                
+                # Try to access prompts as attributes or properties
+                if hasattr(prompts, 'prompts'):
+                    for prompt in prompts.prompts:
+                        print(f"Prompt: {prompt}")
+                elif hasattr(prompts, 'items'):
+                    for name, description in prompts.items():
+                        print(f"Prompt: {name} - {description}")
+                else:
+                    print(f"Could not parse prompts: {prompts}")
+            except Exception as e:
+                print(f"Error listing prompts: {str(e)}")
             
             print("\n--- Deleting a Vector ---")
-            delete_key = f"concept:{SAMPLE_CONCEPTS[-1]}"
-            delete_result = await session.call_tool("delete_vector", {"key": delete_key})
-            delete_data = json.loads(delete_result)
-            print(f"Deleted '{delete_key}': {delete_data.get('status', 'error')}")
+            try:
+                delete_key = f"concept:{SAMPLE_CONCEPTS[-1]}"
+                delete_result = await session.call_tool("delete_vector", {"key": delete_key})
+                delete_data = json.loads(delete_result)
+                print(f"Deleted '{delete_key}': {delete_data.get('status', 'error')}")
+            except Exception as e:
+                print(f"Error deleting vector: {str(e)}")
             
             print("\nMCP client session completed.")
 
