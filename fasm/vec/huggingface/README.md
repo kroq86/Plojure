@@ -15,6 +15,7 @@ Vector database implementation using DuckDB with a simple Gradio interface for i
   - Manage and view existing documents
   - Monitor database statistics
 - **Simple URL-based API**: Easily search using just a URL parameter
+- **Agent-Ready**: Simple HTTP endpoints make it easy to integrate with AI agents and tools
 
 ## About the Database
 
@@ -80,6 +81,41 @@ The application also provides a full REST API for more advanced interactions:
 - `POST /search`: Perform a search with a vector payload
 - `GET /metrics`: Get database metrics
 
+## Integration with AI Agents
+
+This vector database is ideal for use with AI agents thanks to its simple REST API and URL-based search.
+
+### For Agent Tools
+
+The system can be integrated with AI agents in various ways:
+
+1. **Knowledge Retrieval**: Agents can store and retrieve information using semantic search
+   ```python
+   import requests
+   
+   def search_knowledge(query, k=3):
+       response = requests.get(f"http://localhost:7860/search_text?query={query}&k={k}")
+       return response.json()
+   ```
+
+2. **Memory Systems**: Agents can maintain context and recall relevant information
+   ```python
+   def store_memory(key, text_content):
+       requests.post(f"http://localhost:7860/vectors/{key}", json={"text": text_content})
+       
+   def recall_relevant_memories(query):
+       return requests.get(f"http://localhost:7860/search_text?query={query}&k=5").json()
+   ```
+
+3. **Document QA**: Using the vector DB for document retrieval in RAG systems
+   ```python
+   def retrieve_documents(query):
+       results = requests.get(f"http://localhost:7860/search_text?query={query}").json()
+       return [doc["document"] for doc in results["results"]]
+   ```
+
+The simple URL-based search makes it particularly easy to call from any programming language, so agents written in JavaScript, Python, or any other language can use the database without any special libraries.
+
 ## Running Locally
 
 ### With Docker
@@ -116,4 +152,4 @@ This project builds on research in vector databases, nearest neighbor search alg
 
 ---
 
-Created by [Kirill Ostapenko](https://github.com/kroq86) 
+Created by [Kirill Ostapenko](https://github.com/kroq-gar78) 
