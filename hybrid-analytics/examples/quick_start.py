@@ -25,20 +25,20 @@ def demo_analyst_workflow():
     news_data = create_sample_data(
         num_documents=500,
         embedding_dim=128,
-        categories=['технологии', 'наука', 'спорт', 'политика', 'экономика']
+        categories=['technology', 'science', 'sports', 'politics', 'economics']
     )
     
     # Добавим реалистичные заголовки
     tech_titles = [
-        "Новый прорыв в области ИИ",
-        "Квантовые компьютеры становятся реальностью", 
-        "Блокчейн революционизирует финансы",
-        "5G сети меняют мир связи",
-        "Роботы в медицине"
+        "New breakthrough in AI field",
+        "Quantum computers become reality", 
+        "Blockchain revolutionizes finance",
+        "5G networks change communication world",
+        "Robots in medicine"
     ]
     
     for i, row in news_data.iterrows():
-        if row['category'] == 'технологии':
+        if row['category'] == 'technology':
             news_data.at[i, 'title'] = np.random.choice(tech_titles)
     
     print(f"✅ Создано {len(news_data)} новостных статей")
@@ -57,7 +57,7 @@ def demo_analyst_workflow():
         query_vector=query_vector,
         table_name="news",
         filters={
-            'category': 'технологии',
+            'category': 'technology',
             'date': '>2023-06-01'
         },
         limit=10
@@ -116,7 +116,7 @@ def demo_data_scientist_workflow():
     products_data = create_sample_data(
         num_documents=1000,
         embedding_dim=256,  # Больше размерность для товаров
-        categories=['электроника', 'одежда', 'книги', 'спорт', 'дом']
+        categories=['electronics', 'clothing', 'books', 'sports', 'home']
     )
     
     # Переименуем колонки для товаров

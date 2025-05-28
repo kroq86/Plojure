@@ -565,14 +565,14 @@ def create_sample_data(num_documents: int = 1000,
         DataFrame с тестовыми данными
     """
     if categories is None:
-        categories = ['технологии', 'наука', 'спорт', 'политика', 'культура']
+        categories = ['technology', 'science', 'sports', 'politics', 'culture']
     
     np.random.seed(42)
     
     data = {
         'id': list(range(num_documents)),
-        'title': [f'Документ {i}' for i in range(num_documents)],
-        'text': [f'Текст документа {i}' for i in range(num_documents)],
+        'title': [f'Document {i}' for i in range(num_documents)],
+        'text': [f'Text of document {i}' for i in range(num_documents)],
         'embedding': [np.random.rand(embedding_dim).tolist() 
                       for _ in range(num_documents)],
         'category': np.random.choice(categories, num_documents).tolist(),
@@ -602,11 +602,11 @@ if __name__ == "__main__":
     query_vector = np.random.rand(128).tolist()
     results = db.hybrid_search(
         query_vector=query_vector,
-        filters={'category': 'технологии'},
+        filters={'category': 'technology'},
         limit=5
     )
     print(f"Найдено {len(results)} похожих документов в категории "
-          "'технологии'")
+          "'technology'")
     print(results[['id', 'title', 'category', 'similarity']].head())
     
     # Анализ кластеров
