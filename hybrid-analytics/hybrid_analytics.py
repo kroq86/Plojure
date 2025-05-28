@@ -85,8 +85,12 @@ class VectorDB:
         
         # Создаем постоянную таблицу в DuckDB (без векторов для экономии места)
         df_without_vectors = df.drop(columns=[embedding_column])
+        
+        # Регистрируем DataFrame временно для создания таблицы
+        self.conn.register('temp_df', df_without_vectors)
         self.conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-        self.conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df_without_vectors")
+        self.conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
+        self.conn.unregister('temp_df')
         
         # Загружаем векторы в векторную базу
         for _, row in df.iterrows():
