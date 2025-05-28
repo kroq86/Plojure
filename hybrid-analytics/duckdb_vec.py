@@ -113,11 +113,15 @@ class DuckDBVectorDatabase:
         self._vector_dimension = None
 
     def load_library(self):
-        self.mylib = CDLL('./mylib.so')
-        self.mylib.py_dot_product.argtypes = [POINTER(c_double), POINTER(c_double), c_int]
-        self.mylib.py_dot_product.restype = c_double
-        self.mylib.py_vector_norm.argtypes = [POINTER(c_double), c_int]
-        self.mylib.py_vector_norm.restype = c_double
+        try:
+            self.mylib = CDLL('./dot_product.so')
+            self.mylib.py_dot_product.argtypes = [POINTER(c_double), POINTER(c_double), c_int]
+            self.mylib.py_dot_product.restype = c_double
+            self.mylib.py_vector_norm.argtypes = [POINTER(c_double), c_int]
+            self.mylib.py_vector_norm.restype = c_double
+        except OSError:
+            # Fallback to pure Python implementation
+            self.mylib = None
 
     def _initialize_db(self):
         # Drop existing indices first to avoid conflicts
@@ -188,24 +192,46 @@ class DuckDBVectorDatabase:
         return self.metrics
 
     def _calculate_similarity(self, v1: List[float], v2: List[float]) -> float:
-        v1_array = (c_double * len(v1))(*v1)
-        v2_array = (c_double * len(v2))(*v2)
+        if self.mylib is not None:
+            # Use optimized C library
+            v1_array = (c_double * len(v1))(*v1)
+            v2_array = (c_double * len(v2))(*v2)
 
-        if self.similarity_metric == "cosine":
-            dot_product = self.mylib.py_dot_product(v1_array, v2_array, len(v1))
-            norm_v1 = self.mylib.py_vector_norm(v1_array, len(v1))
-            norm_v2 = self.mylib.py_vector_norm(v2_array, len(v2))
+            if self.similarity_metric == "cosine":
+                dot_product = self.mylib.py_dot_product(v1_array, v2_array, len(v1))
+                norm_v1 = self.mylib.py_vector_norm(v1_array, len(v1))
+                norm_v2 = self.mylib.py_vector_norm(v2_array, len(v2))
+                
+                if norm_v1 == 0 or norm_v2 == 0:
+                    return 0.0
+                return dot_product / (norm_v1 * norm_v2)
             
-            if norm_v1 == 0 or norm_v2 == 0:
-                return 0.0
-            return dot_product / (norm_v1 * norm_v2)
-        
-        elif self.similarity_metric == "euclidean":
-            diff = np.array(v1) - np.array(v2)
-            return -np.sqrt(np.sum(diff * diff))  # Negative because larger values should be "more similar"
-        
-        else:  # dot_product
-            return self.mylib.py_dot_product(v1_array, v2_array, len(v1))
+            elif self.similarity_metric == "euclidean":
+                diff = np.array(v1) - np.array(v2)
+                return -np.sqrt(np.sum(diff * diff))
+            
+            else:  # dot_product
+                return self.mylib.py_dot_product(v1_array, v2_array, len(v1))
+        else:
+            # Pure Python fallback
+            v1_np = np.array(v1)
+            v2_np = np.array(v2)
+            
+            if self.similarity_metric == "cosine":
+                dot_product = np.dot(v1_np, v2_np)
+                norm_v1 = np.linalg.norm(v1_np)
+                norm_v2 = np.linalg.norm(v2_np)
+                
+                if norm_v1 == 0 or norm_v2 == 0:
+                    return 0.0
+                return dot_product / (norm_v1 * norm_v2)
+            
+            elif self.similarity_metric == "euclidean":
+                diff = v1_np - v2_np
+                return -np.sqrt(np.sum(diff * diff))
+            
+            else:  # dot_product
+                return np.dot(v1_np, v2_np)
 
     def insert(self, key: str, vector: List[float], partition_id: Optional[int] = None) -> None:
         if partition_id is None:
@@ -240,16 +266,29 @@ class DuckDBVectorDatabase:
         if len(v1) != len(v2):
             raise ValueError("Vectors must have the same dimensions")
 
-        v1_array = (c_double * len(v1))(*v1)
-        v2_array = (c_double * len(v2))(*v2)
+        if self.mylib is not None:
+            v1_array = (c_double * len(v1))(*v1)
+            v2_array = (c_double * len(v2))(*v2)
 
-        dot_product = self.mylib.py_dot_product(v1_array, v2_array, len(v1))
-        norm_v1 = self.mylib.py_vector_norm(v1_array, len(v1))
-        norm_v2 = self.mylib.py_vector_norm(v2_array, len(v2))
+            dot_product = self.mylib.py_dot_product(v1_array, v2_array, len(v1))
+            norm_v1 = self.mylib.py_vector_norm(v1_array, len(v1))
+            norm_v2 = self.mylib.py_vector_norm(v2_array, len(v2))
 
-        if norm_v1 == 0 or norm_v2 == 0:
-            return 0.0
-        return dot_product / (norm_v1 * norm_v2)
+            if norm_v1 == 0 or norm_v2 == 0:
+                return 0.0
+            return dot_product / (norm_v1 * norm_v2)
+        else:
+            # Pure Python fallback
+            v1_np = np.array(v1)
+            v2_np = np.array(v2)
+            
+            dot_product = np.dot(v1_np, v2_np)
+            norm_v1 = np.linalg.norm(v1_np)
+            norm_v2 = np.linalg.norm(v2_np)
+
+            if norm_v1 == 0 or norm_v2 == 0:
+                return 0.0
+            return dot_product / (norm_v1 * norm_v2)
 
     def _process_partition(self, partition_vectors: List[Tuple[str, bytes, int]], query_vector: List[float]) -> List[Tuple[str, float]]:
         similarities = []

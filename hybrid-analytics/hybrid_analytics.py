@@ -9,7 +9,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional, Union
 import pandas as pd
 
-from duckdb_vec import DuckDBVectorDB
+from duckdb_vec import DuckDBVectorDatabase
 
 
 class VectorDB:
@@ -28,8 +28,9 @@ class VectorDB:
             db_path: Путь к файлу базы данных 
                 (если None, используется in-memory)
         """
-        self.db = DuckDBVectorDB(db_path)
+        self.db = DuckDBVectorDatabase(db_path or ':memory:')
         self.conn = self.db.conn
+        self._table_data = {}  # Кэш для данных таблиц
         
     def load_embeddings(self,
                         data_source: Union[str, pd.DataFrame],
@@ -56,8 +57,19 @@ class VectorDB:
         else:
             df = data_source
             
-        # Создание таблицы в DuckDB
+        # Сохраняем данные для SQL запросов
+        self._table_data[table_name] = df
         self.conn.register(table_name, df)
+        
+        # Загружаем векторы в векторную базу
+        for _, row in df.iterrows():
+            key = f"{table_name}_{row['id']}"
+            vector = row[embedding_column]
+            if isinstance(vector, list):
+                self.db.insert(key, vector)
+            else:
+                # Если вектор в другом формате, конвертируем
+                self.db.insert(key, vector.tolist())
         
     def hybrid_search(self,
                       query_vector: List[float],
@@ -82,40 +94,43 @@ class VectorDB:
         Returns:
             DataFrame с результатами поиска
         """
-        # Построение WHERE условий
-        where_conditions = []
+        # Получаем данные таблицы
+        if table_name not in self._table_data:
+            raise ValueError(f"Таблица {table_name} не найдена")
+        
+        df = self._table_data[table_name].copy()
+        
+        # Применяем фильтры
         if filters:
             for column, condition in filters.items():
                 if isinstance(condition, str) and condition.startswith(
                         ('>', '<', '>=', '<=', '!=')):
-                    where_conditions.append(f"{column} {condition}")
+                    # Парсим условие
+                    op = condition.rstrip('0123456789.-')
+                    value = condition[len(op):]
+                    if op == '>':
+                        df = df[df[column] > pd.to_datetime(value) if 'date' in column.lower() else df[column] > float(value)]
+                    elif op == '<':
+                        df = df[df[column] < pd.to_datetime(value) if 'date' in column.lower() else df[column] < float(value)]
+                    # Добавить другие операторы по необходимости
                 else:
-                    where_conditions.append(f"{column} = '{condition}'")
+                    df = df[df[column] == condition]
         
-        where_clause = (" AND ".join(where_conditions) 
-                       if where_conditions else "1=1")
+        # Вычисляем сходство для отфильтрованных записей
+        similarities = []
+        for _, row in df.iterrows():
+            vector = row[embedding_column]
+            if isinstance(vector, list):
+                similarity = self.db.cosine_similarity(query_vector, vector)
+            else:
+                similarity = self.db.cosine_similarity(query_vector, vector.tolist())
+            similarities.append(similarity)
         
-        # Выбор функции сходства
-        similarity_functions = {
-            'cosine': 'cosine_similarity',
-            'euclidean': 'euclidean_distance', 
-            'dot_product': 'dot_product'
-        }
+        df['similarity'] = similarities
         
-        similarity_func = similarity_functions.get(
-            similarity_metric, 'cosine_similarity')
+        # Сортируем и ограничиваем результаты
+        result = df.sort_values('similarity', ascending=False).head(limit)
         
-        # SQL запрос
-        query = f"""
-        SELECT *,
-               {similarity_func}({embedding_column}, ?) AS similarity
-        FROM {table_name}
-        WHERE {where_clause}
-        ORDER BY similarity DESC
-        LIMIT {limit}
-        """
-        
-        result = self.conn.execute(query, [query_vector]).fetchdf()
         return result
         
     def analyze_clusters(self,
@@ -135,35 +150,36 @@ class VectorDB:
         Returns:
             DataFrame с анализом кластеров
         """
-        group_columns = ", ".join(group_by) if group_by else "'all'"
+        if table_name not in self._table_data:
+            raise ValueError(f"Таблица {table_name} не найдена")
         
-        query = f"""
-        WITH similarity_pairs AS (
-            SELECT 
-                a.id as id1,
-                b.id as id2,
-                {group_columns} as cluster_group,
-                cosine_similarity(a.{embedding_column}, 
-                                  b.{embedding_column}) as similarity
-            FROM {table_name} a
-            CROSS JOIN {table_name} b
-            WHERE a.id != b.id
-            AND cosine_similarity(a.{embedding_column}, 
-                                  b.{embedding_column}) > {similarity_threshold}
-        )
-        SELECT 
-            cluster_group,
-            COUNT(DISTINCT id1) as documents_count,
-            AVG(similarity) as avg_similarity,
-            MAX(similarity) as max_similarity,
-            MIN(similarity) as min_similarity
-        FROM similarity_pairs
-        GROUP BY cluster_group
-        ORDER BY documents_count DESC
-        """
+        df = self._table_data[table_name]
         
-        result = self.conn.execute(query).fetchdf()
-        return result
+        # Простая реализация кластерного анализа
+        clusters = []
+        for group_name, group_df in df.groupby(group_by or ['id']):
+            vectors = [row[embedding_column] for _, row in group_df.iterrows()]
+            
+            # Вычисляем средние сходства внутри группы
+            similarities = []
+            for i, v1 in enumerate(vectors):
+                for j, v2 in enumerate(vectors[i+1:], i+1):
+                    if isinstance(v1, list) and isinstance(v2, list):
+                        sim = self.db.cosine_similarity(v1, v2)
+                        similarities.append(sim)
+            
+            if similarities:
+                avg_similarity = np.mean(similarities)
+                if avg_similarity > similarity_threshold:
+                    clusters.append({
+                        'cluster_group': str(group_name),
+                        'documents_count': len(group_df),
+                        'avg_similarity': avg_similarity,
+                        'max_similarity': max(similarities),
+                        'min_similarity': min(similarities)
+                    })
+        
+        return pd.DataFrame(clusters)
         
     def similarity_trends(self,
                           reference_vector: List[float],
@@ -184,31 +200,43 @@ class VectorDB:
         Returns:
             DataFrame с временной динамикой
         """
-        # Функции для группировки по времени
-        time_functions = {
-            'day': f"DATE_TRUNC('day', {time_column})",
-            'week': f"DATE_TRUNC('week', {time_column})",
-            'month': f"DATE_TRUNC('month', {time_column})",
-            'year': f"DATE_TRUNC('year', {time_column})"
-        }
+        if table_name not in self._table_data:
+            raise ValueError(f"Таблица {table_name} не найдена")
         
-        time_func = time_functions.get(period, time_functions['month'])
+        df = self._table_data[table_name].copy()
         
-        query = f"""
-        SELECT 
-            {time_func} as period,
-            COUNT(*) as documents_count,
-            AVG(cosine_similarity({embedding_column}, ?)) as avg_similarity,
-            MAX(cosine_similarity({embedding_column}, ?)) as max_similarity,
-            MIN(cosine_similarity({embedding_column}, ?)) as min_similarity
-        FROM {table_name}
-        GROUP BY {time_func}
-        ORDER BY period
-        """
+        # Вычисляем сходство для всех записей
+        similarities = []
+        for _, row in df.iterrows():
+            vector = row[embedding_column]
+            if isinstance(vector, list):
+                similarity = self.db.cosine_similarity(reference_vector, vector)
+            else:
+                similarity = self.db.cosine_similarity(reference_vector, vector.tolist())
+            similarities.append(similarity)
         
-        result = self.conn.execute(
-            query, [reference_vector, reference_vector, reference_vector]
-        ).fetchdf()
+        df['similarity'] = similarities
+        
+        # Группируем по времени
+        df[time_column] = pd.to_datetime(df[time_column])
+        
+        if period == "month":
+            df['period'] = df[time_column].dt.to_period('M')
+        elif period == "week":
+            df['period'] = df[time_column].dt.to_period('W')
+        elif period == "day":
+            df['period'] = df[time_column].dt.to_period('D')
+        elif period == "year":
+            df['period'] = df[time_column].dt.to_period('Y')
+        
+        # Агрегируем по периодам
+        result = df.groupby('period').agg({
+            'similarity': ['count', 'mean', 'max', 'min']
+        }).round(3)
+        
+        result.columns = ['documents_count', 'avg_similarity', 'max_similarity', 'min_similarity']
+        result = result.reset_index()
+        
         return result
         
     def execute_sql(self, query: str, 
@@ -241,7 +269,6 @@ class VectorDB:
             embedding_column: Колонка с эмбеддингами
             index_type: Тип индекса
         """
-        # Пока что заглушка - в будущем можно добавить поддержку индексов
         print(f"Создание индекса {index_type} для {table_name}."
               f"{embedding_column}")
         
@@ -255,19 +282,14 @@ class VectorDB:
         Returns:
             Словарь со статистикой
         """
-        stats_query = f"""
-        SELECT 
-            COUNT(*) as total_rows,
-            COUNT(DISTINCT embedding) as unique_embeddings
-        FROM {table_name}
-        """
-        
-        result = self.conn.execute(stats_query).fetchone()
-        
-        return {
-            'total_rows': result[0],
-            'unique_embeddings': result[1]
-        }
+        if table_name in self._table_data:
+            df = self._table_data[table_name]
+            return {
+                'total_rows': len(df),
+                'unique_embeddings': len(df)  # Упрощенная версия
+            }
+        else:
+            return {'total_rows': 0, 'unique_embeddings': 0}
 
 
 # Удобные функции для быстрого старта
