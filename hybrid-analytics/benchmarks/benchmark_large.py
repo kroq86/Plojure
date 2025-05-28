@@ -1,0 +1,192 @@
+from duckdb_vec import DuckDBVectorDatabase
+import numpy as np
+import time
+from typing import List, Tuple, Dict
+import matplotlib.pyplot as plt
+from tabulate import tabulate
+import psutil
+
+def generate_random_vectors(num_vectors: int, dimensions: int) -> List[Tuple[str, List[float]]]:
+    vectors = []
+    for i in range(num_vectors):
+        vector = list(np.random.randn(dimensions))
+        vectors.append((f"vec_{i}", vector))
+    return vectors
+
+def run_benchmark(db: DuckDBVectorDatabase, vectors: List[Tuple[str, List[float]]], query_vector: List[float], k: int):
+    results = {}
+    
+    # Insertion benchmark
+    start_time = time.time()
+    db.batch_insert(vectors)
+    insert_time = time.time() - start_time
+    results["insertion"] = {
+        "time": insert_time,
+        "vectors_per_second": len(vectors) / insert_time
+    }
+    
+    # Run comprehensive search benchmark with metrics
+    search_metrics = db.search_with_metrics(query_vector, k)
+    results["search_metrics"] = search_metrics
+    
+    # Get performance metrics
+    results["metrics"] = db.get_metrics()
+    
+    return results
+
+def print_results(results: Dict):
+    print("\n=== Benchmark Results ===\n")
+    
+    # Insertion performance
+    print(f"Insertion Performance:")
+    print(f"Total time: {results['insertion']['time']:.2f} seconds")
+    print(f"Vectors per second: {results['insertion']['vectors_per_second']:.2f}")
+    
+    # Search performance comparison
+    search_metrics = results["search_metrics"]
+    search_data = [
+        ["Method", "Time", "Recall@k", "Speedup"],
+        ["Exact", f"{search_metrics.exact_time:.4f}s", "100%", "1.00x"],
+        ["Approximate", f"{search_metrics.approx_time:.4f}s", 
+         f"{search_metrics.recall_at_k:.2%}", 
+         f"{search_metrics.exact_time/search_metrics.approx_time:.2f}x"],
+        ["LSH", f"{search_metrics.lsh_time:.4f}s", 
+         f"{search_metrics.recall_at_k:.2%}",
+         f"{search_metrics.exact_time/search_metrics.lsh_time:.2f}x"]
+    ]
+    
+    print("\nSearch Performance:")
+    print(tabulate(search_data, headers="firstrow"))
+    
+    print("\nMemory and Cache Metrics:")
+    metrics = results["metrics"]
+    memory_data = [
+        ["Metric", "Value", "Per Vector"],
+        ["Total Memory", f"{search_metrics.memory_used:.2f} MB", 
+         f"{search_metrics.memory_used/metrics.total_vectors*1024:.2f} KB"],
+        ["Cache Size", f"{metrics.cache_size/1024/1024:.2f} MB",
+         f"{metrics.cache_size/metrics.total_vectors/1024:.2f} KB"],
+        ["Cache Hit Ratio", f"{search_metrics.cache_hit_ratio:.2%}", ""],
+        ["Total Vectors", f"{metrics.total_vectors:,}", ""],
+        ["Cache Efficiency", 
+         f"{metrics.cache_hits:,}/{metrics.cache_hits + metrics.cache_misses:,}", ""]
+    ]
+    print(tabulate(memory_data, headers="firstrow"))
+
+def benchmark_similarity_metrics(db: DuckDBVectorDatabase, query_vector: List[float], k: int):
+    metrics = ["cosine", "euclidean", "dot_product"]
+    results = {}
+    
+    for metric in metrics:
+        db.similarity_metric = metric
+        start_time = time.time()
+        similar_vectors = db.search(query_vector, k)
+        search_time = time.time() - start_time
+        results[metric] = {
+            "time": search_time,
+            "results": similar_vectors
+        }
+    
+    return results
+
+def plot_performance_comparison(sizes, times):
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+    methods = ["exact", "approximate", "lsh"]
+    
+    # Search times
+    for method in methods:
+        ax1.plot(sizes, [t[method] for t in times], marker='o', label=method)
+    ax1.set_xlabel("Number of Vectors")
+    ax1.set_ylabel("Search Time (seconds)")
+    ax1.set_title("Search Time Comparison")
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Memory usage
+    ax2.plot(sizes, [t.get("memory_used", 0) for t in times], marker='o', label="Total Memory")
+    ax2.plot(sizes, [t.get("cache_size", 0)/1024/1024 for t in times], marker='s', label="Cache Size")
+    ax2.set_xlabel("Number of Vectors")
+    ax2.set_ylabel("Memory Usage (MB)")
+    ax2.set_title("Memory Scaling")
+    ax2.legend()
+    ax2.grid(True)
+    
+    # Speedup
+    speedups = []
+    for t in times:
+        exact_time = t["exact"]
+        speedup = {
+            "approximate": exact_time / t["approximate"] if t["approximate"] > 0 else 0,
+            "lsh": exact_time / t["lsh"] if t["lsh"] > 0 else 0
+        }
+        speedups.append(speedup)
+    
+    for method in ["approximate", "lsh"]:
+        ax3.plot(sizes, [s[method] for s in speedups], marker='o', label=method)
+    ax3.set_xlabel("Number of Vectors")
+    ax3.set_ylabel("Speedup vs Exact Search")
+    ax3.set_title("Search Method Speedup")
+    ax3.legend()
+    ax3.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig("search_performance.png")
+    plt.close()
+
+def main():
+    # Test parameters
+    dimensions = 128
+    k = 5
+    
+    # Test with different dataset sizes
+    sizes = [10000, 50000, 100000]
+    search_times = []
+    
+    for size in sizes:
+        print(f"\n=== Testing with {size} vectors ===")
+        vectors = generate_random_vectors(size, dimensions)
+        query_vector = list(np.random.randn(dimensions))
+        
+        db = DuckDBVectorDatabase(
+            f"vectors_benchmark_{size}.duckdb",
+            chunk_size=1000,
+            max_cache_size=1024 * 1024 * 1024  # 1GB cache
+        )
+        
+        # Run main benchmark
+        results = run_benchmark(db, vectors, query_vector, k)
+        print_results(results)
+        
+        # Store search times for plotting
+        search_metrics = results["search_metrics"]
+        search_times.append({
+            "exact": search_metrics.exact_time,
+            "approximate": search_metrics.approx_time,
+            "lsh": search_metrics.lsh_time
+        })
+        
+        # Test different similarity metrics
+        print("\nTesting different similarity metrics:")
+        similarity_results = benchmark_similarity_metrics(db, query_vector, k)
+        
+        metric_data = []
+        for metric, data in similarity_results.items():
+            best_score = "N/A"
+            if data["results"] and len(data["results"]) > 0:
+                best_score = f"{data['results'][0][1]:.4f}"
+            
+            metric_data.append([
+                metric,
+                f"{data['time']:.4f}s",
+                best_score
+            ])
+        
+        print(tabulate(metric_data, headers=["Metric", "Time", "Best Score"]))
+        
+        db.close()
+    
+    # Plot performance comparison
+    plot_performance_comparison(sizes, search_times)
+
+if __name__ == "__main__":
+    main() 
