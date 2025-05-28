@@ -4,7 +4,7 @@ import numpy as np
 def main():
     # Initialize database with 1GB cache
     db = DuckDBVectorDatabase(
-        "vectors.duckdb",
+        "example_vectors.duckdb",
         chunk_size=1000,
         max_cache_size=1024 * 1024 * 1024
     )

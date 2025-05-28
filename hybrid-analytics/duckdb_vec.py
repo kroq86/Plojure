@@ -95,7 +95,7 @@ class LSHIndex:
 
 class DuckDBVectorDatabase:
     def __init__(self, 
-                 db_path: str = ':memory:', 
+                 db_path: str = 'vectors.duckdb', 
                  chunk_size: int = 1000, 
                  max_cache_size: int = 1024 * 1024 * 1024,
                  similarity_metric: Literal["cosine", "euclidean", "dot_product"] = "cosine"):

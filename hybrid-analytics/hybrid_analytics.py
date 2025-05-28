@@ -31,7 +31,7 @@ class VectorDB:
     в едином интерфейсе. Поддерживает мультипроцессинг для ускорения.
     """
     
-    def __init__(self, db_path: Optional[str] = None, 
+    def __init__(self, db_path: Optional[str] = 'hybrid_analytics.duckdb', 
                  enable_parallel: bool = True):
         """
         Инициализация базы данных
@@ -41,7 +41,7 @@ class VectorDB:
                 (если None, используется in-memory)
             enable_parallel: Включить параллельную обработку
         """
-        self.db = DuckDBVectorDatabase(db_path or ':memory:')
+        self.db = DuckDBVectorDatabase(db_path or 'hybrid_analytics.duckdb')
         self.conn = self.db.conn
         self._table_data = {}  # Кэш для данных таблиц
         
