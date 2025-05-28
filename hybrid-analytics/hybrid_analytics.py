@@ -534,12 +534,12 @@ def create_sample_data(num_documents: int = 1000,
     np.random.seed(42)
     
     data = {
-        'id': range(num_documents),
+        'id': list(range(num_documents)),
         'title': [f'Документ {i}' for i in range(num_documents)],
         'text': [f'Текст документа {i}' for i in range(num_documents)],
         'embedding': [np.random.rand(embedding_dim).tolist() 
                       for _ in range(num_documents)],
-        'category': np.random.choice(categories, num_documents),
+        'category': np.random.choice(categories, num_documents).tolist(),
         'date': pd.date_range('2023-01-01', periods=num_documents, 
                               freq='D')[:num_documents]
     }
