@@ -84,7 +84,12 @@ class VectorDB:
         self._table_data[table_name] = df
         
         # Создаем постоянную таблицу в DuckDB (без векторов для экономии места)
-        df_without_vectors = df.drop(columns=[embedding_column])
+        df_without_vectors = df.drop(columns=[embedding_column]).copy()
+        
+        # Конвертируем datetime колонки в строки для DuckDB
+        for col in df_without_vectors.columns:
+            if df_without_vectors[col].dtype == 'datetime64[ns]':
+                df_without_vectors[col] = df_without_vectors[col].astype(str)
         
         # Регистрируем DataFrame временно для создания таблицы
         self.conn.register('temp_df', df_without_vectors)
@@ -133,6 +138,10 @@ class VectorDB:
             try:
                 df_meta = self.conn.execute(f"SELECT * FROM {table_name}").fetchdf()
                 if len(df_meta) > 0:
+                    # Конвертируем строковые даты обратно в datetime
+                    if 'date' in df_meta.columns:
+                        df_meta['date'] = pd.to_datetime(df_meta['date'])
+                    
                     # Восстанавливаем векторы из векторной базы
                     embeddings = []
                     for _, row in df_meta.iterrows():
