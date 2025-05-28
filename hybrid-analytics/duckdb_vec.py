@@ -101,9 +101,7 @@ class DuckDBVectorDatabase:
                  similarity_metric: Literal["cosine", "euclidean", "dot_product"] = "cosine"):
         self.db_path = db_path
         self.conn = duckdb.connect(db_path)
-        # Настройки для персистентности
-        self.conn.execute("PRAGMA enable_checkpoint_on_shutdown=true")
-        self.conn.execute("PRAGMA wal_autocheckpoint=1000")
+        # DuckDB автоматически сохраняет данные при закрытии соединения
         self.chunk_size = chunk_size
         self.max_cache_size = max_cache_size
         self.similarity_metric = similarity_metric
@@ -246,7 +244,6 @@ class DuckDBVectorDatabase:
             INSERT OR REPLACE INTO vectors (key, vector, dimensions, partition_id)
             VALUES (?, ?, ?, ?)
         """, [key, vector_data, len(vector), partition_id])
-        self.conn.commit()  # Явный COMMIT для сохранения
         self._set_cached_vector(key, vector)
         self.lsh_index.insert(key, vector)
 
@@ -497,12 +494,7 @@ class DuckDBVectorDatabase:
 
     def close(self):
         self.clear_cache()
-        # Принудительный checkpoint для сохранения данных
-        try:
-            self.conn.execute("PRAGMA wal_checkpoint(FULL)")
-            self.conn.commit()
-        except Exception as e:
-            print(f"Warning: Could not checkpoint database: {e}")
+        # DuckDB автоматически сохраняет данные при закрытии
         self.conn.close()
         print(f"✅ База данных сохранена в файл: {self.db_path}")
 
