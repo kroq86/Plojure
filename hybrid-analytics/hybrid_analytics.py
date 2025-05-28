@@ -82,7 +82,11 @@ class VectorDB:
             
         # Сохраняем данные для SQL запросов
         self._table_data[table_name] = df
-        self.conn.register(table_name, df)
+        
+        # Создаем постоянную таблицу в DuckDB (без векторов для экономии места)
+        df_without_vectors = df.drop(columns=[embedding_column])
+        self.conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+        self.conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df_without_vectors")
         
         # Загружаем векторы в векторную базу
         for _, row in df.iterrows():
@@ -121,7 +125,23 @@ class VectorDB:
         """
         # Получаем данные таблицы
         if table_name not in self._table_data:
-            raise ValueError(f"Таблица {table_name} не найдена")
+            # Пытаемся загрузить из постоянной таблицы DuckDB
+            try:
+                df_meta = self.conn.execute(f"SELECT * FROM {table_name}").fetchdf()
+                if len(df_meta) > 0:
+                    # Восстанавливаем векторы из векторной базы
+                    embeddings = []
+                    for _, row in df_meta.iterrows():
+                        key = f"{table_name}_{row['id']}"
+                        vector = self.db.retrieve(key)
+                        embeddings.append(vector if vector else [0.0] * 128)
+                    
+                    df_meta[embedding_column] = embeddings
+                    self._table_data[table_name] = df_meta
+                else:
+                    raise ValueError(f"Таблица {table_name} пуста")
+            except Exception:
+                raise ValueError(f"Таблица {table_name} не найдена")
         
         df = self._table_data[table_name].copy()
         
@@ -425,14 +445,28 @@ class VectorDB:
         Returns:
             Словарь со статистикой
         """
-        if table_name in self._table_data:
-            df = self._table_data[table_name]
+        try:
+            # Пытаемся получить статистику из постоянной таблицы DuckDB
+            result = self.conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+            total_rows = result[0] if result else 0
+            
+            # Статистика по векторам
+            vector_count = self.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+            
             return {
-                'total_rows': len(df),
-                'unique_embeddings': len(df)  # Упрощенная версия
+                'total_rows': total_rows,
+                'unique_embeddings': vector_count
             }
-        else:
-            return {'total_rows': 0, 'unique_embeddings': 0}
+        except Exception:
+            # Fallback на кэш если таблица не найдена
+            if table_name in self._table_data:
+                df = self._table_data[table_name]
+                return {
+                    'total_rows': len(df),
+                    'unique_embeddings': len(df)
+                }
+            else:
+                return {'total_rows': 0, 'unique_embeddings': 0}
     
     def close(self):
         """Закрытие базы данных с сохранением на диск"""
