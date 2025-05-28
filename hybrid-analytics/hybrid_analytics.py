@@ -11,26 +11,49 @@ import pandas as pd
 
 from duckdb_vec import DuckDBVectorDatabase
 
+# Импорт модуля параллельной обработки
+try:
+    from parallel_processing import (
+        ParallelVectorProcessor, 
+        batch_similarity_search_parallel
+    )
+    PARALLEL_AVAILABLE = True
+except ImportError:
+    PARALLEL_AVAILABLE = False
+    print("⚠️ Модуль параллельной обработки недоступен")
+
 
 class VectorDB:
     """
     Основной класс для работы с гибридными аналитическими запросами
     
     Позволяет совмещать векторный поиск с классической SQL-аналитикой
-    в едином интерфейсе
+    в едином интерфейсе. Поддерживает мультипроцессинг для ускорения.
     """
     
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[str] = None, 
+                 enable_parallel: bool = True):
         """
         Инициализация базы данных
         
         Args:
             db_path: Путь к файлу базы данных 
                 (если None, используется in-memory)
+            enable_parallel: Включить параллельную обработку
         """
         self.db = DuckDBVectorDatabase(db_path or ':memory:')
         self.conn = self.db.conn
         self._table_data = {}  # Кэш для данных таблиц
+        
+        # Инициализация параллельной обработки
+        self.parallel_enabled = enable_parallel and PARALLEL_AVAILABLE
+        if self.parallel_enabled:
+            self.parallel_processor = ParallelVectorProcessor()
+            print("✅ Параллельная обработка включена")
+        else:
+            self.parallel_processor = None
+            if enable_parallel:
+                print("⚠️ Параллельная обработка отключена")
         
     def load_embeddings(self,
                         data_source: Union[str, pd.DataFrame],
@@ -77,7 +100,8 @@ class VectorDB:
                       embedding_column: str = "embedding",
                       filters: Optional[Dict[str, Any]] = None,
                       similarity_metric: str = "cosine",
-                      limit: int = 10) -> pd.DataFrame:
+                      limit: int = 10,
+                      use_parallel: bool = True) -> pd.DataFrame:
         """
         Гибридный поиск: векторное сходство + фильтрация по метаданным
         
@@ -90,6 +114,7 @@ class VectorDB:
             similarity_metric: Метрика сходства 
                 ('cosine', 'euclidean', 'dot_product')
             limit: Количество результатов
+            use_parallel: Использовать параллельную обработку
             
         Returns:
             DataFrame с результатами поиска
@@ -109,29 +134,147 @@ class VectorDB:
                     op = condition.rstrip('0123456789.-')
                     value = condition[len(op):]
                     if op == '>':
-                        df = df[df[column] > pd.to_datetime(value) if 'date' in column.lower() else df[column] > float(value)]
+                        if 'date' in column.lower():
+                            df = df[df[column] > pd.to_datetime(value)]
+                        else:
+                            df = df[df[column] > float(value)]
                     elif op == '<':
-                        df = df[df[column] < pd.to_datetime(value) if 'date' in column.lower() else df[column] < float(value)]
+                        if 'date' in column.lower():
+                            df = df[df[column] < pd.to_datetime(value)]
+                        else:
+                            df = df[df[column] < float(value)]
                     # Добавить другие операторы по необходимости
                 else:
                     df = df[df[column] == condition]
         
-        # Вычисляем сходство для отфильтрованных записей
-        similarities = []
-        for _, row in df.iterrows():
-            vector = row[embedding_column]
-            if isinstance(vector, list):
-                similarity = self.db.cosine_similarity(query_vector, vector)
-            else:
-                similarity = self.db.cosine_similarity(query_vector, vector.tolist())
-            similarities.append(similarity)
-        
-        df['similarity'] = similarities
-        
-        # Сортируем и ограничиваем результаты
-        result = df.sort_values('similarity', ascending=False).head(limit)
+        # Выбираем метод вычисления сходства
+        if (use_parallel and self.parallel_enabled and 
+            len(df) > 1000):  # Используем параллельную обработку для больших данных
+            
+            # Подготавливаем данные для параллельной обработки
+            vectors_data = []
+            for _, row in df.iterrows():
+                key = str(row['id'])
+                vector = row[embedding_column]
+                if not isinstance(vector, list):
+                    vector = vector.tolist()
+                vectors_data.append((key, vector))
+            
+            # Параллельный поиск
+            parallel_results = batch_similarity_search_parallel(
+                query_vector=query_vector,
+                vectors_data=vectors_data,
+                similarity_metric=similarity_metric,
+                num_processes=self.parallel_processor.num_processes
+            )
+            
+            # Преобразуем результаты обратно в DataFrame
+            result_ids = [int(key) for key, _ in parallel_results[:limit]]
+            similarities = [sim for _, sim in parallel_results[:limit]]
+            
+            result_df = df[df['id'].isin(result_ids)].copy()
+            result_df['similarity'] = result_df['id'].map(
+                dict(zip(result_ids, similarities)))
+            result = result_df.sort_values('similarity', ascending=False)
+            
+        else:
+            # Последовательное вычисление сходства
+            similarities = []
+            for _, row in df.iterrows():
+                vector = row[embedding_column]
+                if isinstance(vector, list):
+                    similarity = self.db.cosine_similarity(query_vector, vector)
+                else:
+                    similarity = self.db.cosine_similarity(
+                        query_vector, vector.tolist())
+                similarities.append(similarity)
+            
+            df['similarity'] = similarities
+            result = df.sort_values('similarity', ascending=False).head(limit)
         
         return result
+        
+    def parallel_batch_search(self,
+                             query_vectors: List[List[float]],
+                             table_name: str = "documents",
+                             embedding_column: str = "embedding",
+                             similarity_metric: str = "cosine",
+                             limit: int = 10) -> List[pd.DataFrame]:
+        """
+        Параллельный поиск для множества запросов
+        
+        Args:
+            query_vectors: Список векторов запросов
+            table_name: Имя таблицы
+            embedding_column: Колонка с эмбеддингами
+            similarity_metric: Метрика сходства
+            limit: Количество результатов на запрос
+            
+        Returns:
+            Список DataFrame с результатами для каждого запроса
+        """
+        if not self.parallel_enabled:
+            # Fallback на последовательную обработку
+            return [
+                self.hybrid_search(
+                    query_vector=qv,
+                    table_name=table_name,
+                    embedding_column=embedding_column,
+                    similarity_metric=similarity_metric,
+                    limit=limit,
+                    use_parallel=False
+                )
+                for qv in query_vectors
+            ]
+        
+        results = []
+        for query_vector in query_vectors:
+            result = self.hybrid_search(
+                query_vector=query_vector,
+                table_name=table_name,
+                embedding_column=embedding_column,
+                similarity_metric=similarity_metric,
+                limit=limit,
+                use_parallel=True
+            )
+            results.append(result)
+        
+        return results
+        
+    def benchmark_search_performance(self,
+                                   query_vector: List[float],
+                                   table_name: str = "documents",
+                                   embedding_column: str = "embedding") -> Dict[str, Any]:
+        """
+        Бенчмарк производительности поиска
+        
+        Args:
+            query_vector: Вектор запроса
+            table_name: Имя таблицы
+            embedding_column: Колонка с эмбеддингами
+            
+        Returns:
+            Словарь с метриками производительности
+        """
+        if not self.parallel_enabled:
+            return {"error": "Параллельная обработка недоступна"}
+        
+        # Получаем данные
+        df = self._table_data[table_name]
+        vectors_data = []
+        for _, row in df.iterrows():
+            key = str(row['id'])
+            vector = row[embedding_column]
+            if not isinstance(vector, list):
+                vector = vector.tolist()
+            vectors_data.append((key, vector))
+        
+        # Запускаем бенчмарк
+        return self.parallel_processor.benchmark_parallel_vs_sequential(
+            query_vector=query_vector,
+            vectors_data=vectors_data,
+            similarity_metric="cosine"
+        )
         
     def analyze_clusters(self,
                          table_name: str = "documents",
