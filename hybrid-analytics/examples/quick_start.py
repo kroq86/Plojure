@@ -236,11 +236,11 @@ def demo_advanced_analytics():
     # Упрощенный анализ без векторных вычислений в SQL
     simple_analysis = db.execute_sql("""
         SELECT 
-            DATE_TRUNC('month', date) as month,
+            DATE_TRUNC('month', CAST(date AS DATE)) as month,
             category,
             COUNT(*) as docs_count
         FROM tech_trends
-        GROUP BY DATE_TRUNC('month', date), category
+        GROUP BY DATE_TRUNC('month', CAST(date AS DATE)), category
         ORDER BY month, docs_count DESC
     """)
     
