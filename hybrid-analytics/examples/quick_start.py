@@ -46,7 +46,7 @@ def demo_analyst_workflow():
     
     # 2. Инициализация базы данных
     print("\n2. Инициализация аналитической базы...")
-    db = VectorDB()
+    db = VectorDB(db_path="analytics_news.duckdb")
     db.load_embeddings(news_data, table_name="news")
     
     # 3. Поиск похожих статей о технологиях
@@ -97,6 +97,10 @@ def demo_analyst_workflow():
     print("📈 Статистика по категориям:")
     print(category_stats_df)
     
+    # Закрываем базу данных для сохранения
+    db.close()
+    print("💾 База данных новостей сохранена в analytics_news.duckdb")
+    
     return db, news_data
 
 
@@ -129,7 +133,7 @@ def demo_data_scientist_workflow():
     
     # 2. Инициализация базы данных
     print("\n2. Инициализация ML-базы...")
-    db = VectorDB()
+    db = VectorDB(db_path="ml_products.duckdb")
     db.load_embeddings(products_data, table_name="products")
     
     # 3. Построение рекомендательной системы
@@ -187,6 +191,10 @@ def demo_data_scientist_workflow():
           f"{recs_a['rating'].mean():.2f}")
     print(f"📊 Алгоритм B (евклид): средний рейтинг = "
           f"{recs_b['rating'].mean():.2f}")
+    
+    # Закрываем базу данных для сохранения
+    db.close()
+    print("💾 База данных товаров сохранена в ml_products.duckdb")
     
     return db, products_data
 

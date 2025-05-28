@@ -433,6 +433,16 @@ class VectorDB:
             }
         else:
             return {'total_rows': 0, 'unique_embeddings': 0}
+    
+    def close(self):
+        """Закрытие базы данных с сохранением на диск"""
+        self.db.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 
 # Удобные функции для быстрого старта
