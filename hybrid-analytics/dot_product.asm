@@ -1,9 +1,9 @@
 format ELF64
-public dot_product
-public vector_norm
+public py_dot_product
+public py_vector_norm
 section '.text' executable
 
-dot_product:
+py_dot_product:
     ; Calculate dot product of two vectors
     ; Parameters:
     ;   rdi: Pointer to the first vector
@@ -24,7 +24,7 @@ loop_start_dot_product:
     loop loop_start_dot_product
     ret
 
-vector_norm:
+py_vector_norm:
     ; Calculate Euclidean norm of a vector
     ; Parameters:
     ;   rdi: Pointer to the vector
