@@ -68,6 +68,8 @@ class VectorDB:
             table_name: Имя таблицы для создания
             embedding_column: Название колонки с векторами
         """
+        print(f"🔍 Загрузка данных в таблицу {table_name}...")
+        
         if isinstance(data_source, str):
             # Загрузка из файла
             if data_source.endswith('.parquet'):
@@ -80,25 +82,57 @@ class VectorDB:
         else:
             df = data_source
             
+        print(f"📊 DataFrame создан: {len(df)} строк, колонки: {list(df.columns)}")
+        print(f"📊 Типы данных: {dict(df.dtypes)}")
+            
         # Сохраняем данные для SQL запросов
         self._table_data[table_name] = df
+        
+        print(f"🗂️ Создание таблицы DuckDB без колонки {embedding_column}...")
         
         # Создаем постоянную таблицу в DuckDB (без векторов для экономии места)
         df_without_vectors = df.drop(columns=[embedding_column]).copy()
         
+        print(f"📊 DataFrame без векторов: колонки {list(df_without_vectors.columns)}")
+        print(f"📊 Типы данных без векторов: {dict(df_without_vectors.dtypes)}")
+        
         # Конвертируем datetime колонки в строки для DuckDB
         for col in df_without_vectors.columns:
             if df_without_vectors[col].dtype == 'datetime64[ns]':
+                print(f"🕐 Конвертирую колонку {col} из datetime в string")
                 df_without_vectors[col] = df_without_vectors[col].astype(str)
         
-        # Регистрируем DataFrame временно для создания таблицы
-        self.conn.register('temp_df', df_without_vectors)
-        self.conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-        self.conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
-        self.conn.unregister('temp_df')
+        print(f"📊 Финальные типы данных: {dict(df_without_vectors.dtypes)}")
+        
+        try:
+            # Регистрируем DataFrame временно для создания таблицы
+            print(f"📝 Регистрирую временный DataFrame...")
+            self.conn.register('temp_df', df_without_vectors)
+            
+            print(f"🗑️ Удаляю старую таблицу {table_name}...")
+            self.conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+            
+            print(f"🏗️ Создаю новую таблицу {table_name}...")
+            self.conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
+            
+            print(f"🧹 Удаляю временную регистрацию...")
+            self.conn.unregister('temp_df')
+            
+            print(f"✅ Таблица {table_name} создана успешно!")
+            
+        except Exception as e:
+            print(f"❌ Ошибка при создании таблицы DuckDB: {e}")
+            print(f"🔍 Проблемные данные:")
+            for col in df_without_vectors.columns:
+                print(f"  {col}: {df_without_vectors[col].dtype} - пример: {df_without_vectors[col].iloc[0]}")
+            raise
+        
+        print(f"🔢 Загружаю {len(df)} векторов в векторную базу...")
         
         # Загружаем векторы в векторную базу
-        for _, row in df.iterrows():
+        for i, (_, row) in enumerate(df.iterrows()):
+            if i % 100 == 0:
+                print(f"  Обработано {i}/{len(df)} векторов...")
             key = f"{table_name}_{row['id']}"
             vector = row[embedding_column]
             if isinstance(vector, list):
@@ -106,6 +140,8 @@ class VectorDB:
             else:
                 # Если вектор в другом формате, конвертируем
                 self.db.insert(key, vector.tolist())
+        
+        print(f"✅ Загрузка завершена: {len(df)} документов в таблице {table_name}")
         
     def hybrid_search(self,
                       query_vector: List[float],
