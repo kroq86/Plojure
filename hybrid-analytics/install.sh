@@ -121,6 +121,9 @@ setup_venv() {
 test_installation() {
     echo "🧪 Тестирование установки..."
     
+    # Активируем виртуальное окружение
+    source venv/bin/activate
+    
     python3 -c "
 import sys
 sys.path.append('.')
@@ -156,8 +159,8 @@ main() {
     fi
     
     install_fasm
-    setup_venv
     compile_asm
+    setup_venv
     test_installation
     
     echo ""
@@ -167,10 +170,10 @@ main() {
     echo "  source venv/bin/activate"
     echo ""
     echo "Для запуска демо:"
-    echo "  python examples/quick_start.py"
+    echo "  source venv/bin/activate && python examples/quick_start.py"
     echo ""
     echo "Для запуска основного модуля:"
-    echo "  python hybrid_analytics.py"
+    echo "  source venv/bin/activate && python hybrid_analytics.py"
 }
 
 # Запуск
