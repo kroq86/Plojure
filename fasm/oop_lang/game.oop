@@ -1,0 +1,78 @@
+# Same game as fasm/oop_game: Entity + GameState, player vs enemy.
+# Compiled to FASM by compiler.py; run with ./build.sh then python3 run_game.py
+
+class Entity
+  int type
+  int health
+
+  def get_health() -> int
+    return this.health
+  end
+
+  def set_health(int h) -> void
+    this.health = h
+  end
+end
+
+class GameState
+  Entity player
+  Entity enemy
+  int status
+  int winner
+
+  def init() -> void
+    this.player.type = 0
+    this.player.health = 100
+    this.enemy.type = 1
+    this.enemy.health = 100
+    this.status = 0
+    this.winner = 0
+  end
+
+  def get_player_health() -> int
+    return this.player.health
+  end
+
+  def get_enemy_health() -> int
+    return this.enemy.health
+  end
+
+  def tick(int player_damage, int enemy_damage) -> void
+    int enemy_h = this.enemy.health - player_damage
+    if enemy_h < 0
+      enemy_h = 0
+    end
+    this.enemy.health = enemy_h
+    int player_h = this.player.health - enemy_damage
+    if player_h < 0
+      player_h = 0
+    end
+    this.player.health = player_h
+    if this.status == 1
+      return
+    end
+    int p = this.player.health
+    int e = this.enemy.health
+    if p <= 0
+      this.status = 1
+      if e <= 0
+        this.winner = 3
+      else
+        this.winner = 2
+      end
+    else
+      if e <= 0
+        this.status = 1
+        this.winner = 1
+      end
+    end
+  end
+
+  def is_over() -> int
+    return this.status
+  end
+
+  def get_winner() -> int
+    return this.winner
+  end
+end
