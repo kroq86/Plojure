@@ -170,4 +170,4 @@ game_state_get_winner:
     ret
 
 ; Mark stack non-executable (silences ld warning about missing .note.GNU-stack)
-section '.note.GNU-stack' noalloc
+section '.note.GNU-stack'
