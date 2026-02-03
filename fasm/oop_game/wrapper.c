@@ -1,6 +1,7 @@
 /*
- * C wrapper for OOP-on-FASM game.asm.
- * Struct layout must match game.asm (Entity 8 bytes, GameState 24 bytes).
+ * C wrapper for OOP-on-FASM game.asm (see rules.mdc).
+ * Struct layout must match game.asm: Entity 8 bytes, GameState 24 bytes.
+ * Calling convention: SysV x64 (RDI, RSI, RDX, ...; EAX return).
  */
 #include <stdint.h>
 #include <stdlib.h>
