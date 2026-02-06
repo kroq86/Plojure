@@ -36,6 +36,7 @@ env/
 *.swp
 *.swo
 .DS_Store
+.cursor-*/
 
 # Project specific
 *.log
