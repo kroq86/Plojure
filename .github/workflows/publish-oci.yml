@@ -2,6 +2,11 @@ name: Publish OCI Image
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "OCI version to publish, for example 0.1.1"
+        required: true
+        type: string
   push:
     tags:
       - "vector-db-v*"
@@ -19,6 +24,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#vector-db-v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -39,7 +55,7 @@ jobs:
         with:
           images: ghcr.io/kroq86/vector-db-mcp
           tags: |
-            type=match,pattern=vector-db-v(.*),group=1
+            type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push image
