@@ -2,6 +2,10 @@ from mcp.server.fastmcp import FastMCP
 from typing import List
 import json
 import os
+import threading
+import time
+
+from starlette.responses import JSONResponse
 
 from duckdb_vec import DuckDBVectorDatabase
 
@@ -13,11 +17,44 @@ class MCPVectorDatabaseServer:
     
     def __init__(self, db_path: str = ':memory:', server_name: str = "VectorDBServer"):
         self.vector_db = DuckDBVectorDatabase(db_path)
-        self.mcp = FastMCP(server_name)
+        host = os.environ.get("MCP_HOST", "127.0.0.1")
+        port = int(os.environ.get("MCP_PORT", "8000"))
+        mount_path = os.environ.get("MCP_MOUNT_PATH", "/")
+        streamable_http_path = os.environ.get("MCP_STREAMABLE_HTTP_PATH", "/mcp")
+        self._write_lock = threading.RLock()
+        self._started_at = time.time()
+        self._ready = False
+        self.mcp = FastMCP(
+            server_name,
+            host=host,
+            port=port,
+            mount_path=mount_path,
+            streamable_http_path=streamable_http_path,
+        )
         
         self._register_tools()
         self._register_resources()
         self._register_prompts()
+        self._register_http_routes()
+        self._ready = True
+
+    def _server_status(self) -> dict:
+        db_ok = False
+        error = None
+        try:
+            self.vector_db.conn.execute("SELECT 1").fetchone()
+            db_ok = True
+        except Exception as exc:
+            error = str(exc)
+
+        return {
+            "status": "ok" if db_ok else "error",
+            "ready": self._ready and db_ok,
+            "db_ok": db_ok,
+            "uptime_seconds": round(time.time() - self._started_at, 3),
+            "runtime": self.vector_db.get_runtime_info(),
+            "error": error,
+        }
     
     def _register_tools(self):
         """Register all MCP tools"""
@@ -60,7 +97,8 @@ class MCPVectorDatabaseServer:
                 Success message
             """
             try:
-                self.vector_db.insert(key, vector)
+                with self._write_lock:
+                    self.vector_db.insert(key, vector)
                 return json.dumps({"status": "success", "message": f"Vector inserted with key: {key}"})
             except Exception as e:
                 return json.dumps({"error": str(e)})
@@ -77,7 +115,8 @@ class MCPVectorDatabaseServer:
                 Success message
             """
             try:
-                success = self.vector_db.delete(key)
+                with self._write_lock:
+                    success = self.vector_db.delete(key)
                 if success:
                     return json.dumps({"status": "success", "message": f"Vector with key {key} deleted"})
                 else:
@@ -101,8 +140,151 @@ class MCPVectorDatabaseServer:
                     "memory_usage_mb": metrics.memory_usage,
                     "total_vectors": metrics.total_vectors,
                     "total_dimensions": metrics.total_dimensions,
-                    "cache_size_bytes": metrics.cache_size
+                    "cache_size_bytes": metrics.cache_size,
+                    "runtime": self.vector_db.get_runtime_info()
                 })
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        @self.mcp.tool()
+        def upsert_document_chunk(
+            key: str,
+            content: str,
+            path: str,
+            start_line: int,
+            end_line: int,
+        ) -> str:
+            """
+            Insert or update a repository/document chunk and its derived embedding.
+            """
+            try:
+                with self._write_lock:
+                    self.vector_db.upsert_document_chunk(
+                        key=key,
+                        content=content,
+                        path=path,
+                        start_line=start_line,
+                        end_line=end_line,
+                    )
+                return json.dumps({"status": "success", "key": key, "path": path})
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        @self.mcp.tool()
+        def index_repository(
+            root_path: str,
+            chunk_size_lines: int = 40,
+            overlap_lines: int = 10,
+        ) -> str:
+            """
+            Index source files in a repository into searchable document chunks.
+            """
+            try:
+                with self._write_lock:
+                    result = self.vector_db.index_repository(
+                        root_path=root_path,
+                        chunk_size_lines=chunk_size_lines,
+                        overlap_lines=overlap_lines,
+                    )
+                return json.dumps({"status": "success", **result})
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        @self.mcp.tool()
+        def index_workspace(
+            workspace_root: str = "/workspace",
+            chunk_size_lines: int = 40,
+            overlap_lines: int = 10,
+        ) -> str:
+            """
+            Index a mounted workspace path for code and docs retrieval.
+            """
+            try:
+                with self._write_lock:
+                    result = self.vector_db.index_workspace(
+                        workspace_root,
+                        chunk_size_lines=chunk_size_lines,
+                        overlap_lines=overlap_lines,
+                    )
+                return json.dumps({"status": "success", **result})
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        @self.mcp.tool()
+        def refresh_path(
+            root_path: str,
+            target_path: str,
+            chunk_size_lines: int = 40,
+            overlap_lines: int = 10,
+        ) -> str:
+            """
+            Re-index a single file or subtree after changes.
+            """
+            try:
+                with self._write_lock:
+                    result = self.vector_db.refresh_path(
+                        root_path=root_path,
+                        target_path=target_path,
+                        chunk_size_lines=chunk_size_lines,
+                        overlap_lines=overlap_lines,
+                    )
+                return json.dumps({"status": "success", **result})
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        @self.mcp.tool()
+        def semantic_search_code(query: str, k: int = 5, method: str = "exact") -> str:
+            """
+            Search indexed repository/document chunks using deterministic text embeddings.
+            """
+            valid_methods = ["exact", "approximate", "lsh"]
+            if method not in valid_methods:
+                return json.dumps({"error": f"Invalid method. Choose from: {', '.join(valid_methods)}"})
+
+            try:
+                results = self.vector_db.search_document_chunks(query, k=k, method=method)
+                return json.dumps({"results": results})
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        @self.mcp.tool()
+        def search_symbols(query: str, k: int = 5) -> str:
+            """
+            Search indexed chunks by declared symbol names with symbol-aware reranking.
+            """
+            try:
+                results = self.vector_db.search_symbols(query, k=k)
+                return json.dumps({"results": results})
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        @self.mcp.tool()
+        def search_docs(query: str, k: int = 5, method: str = "exact") -> str:
+            """
+            Search only documentation-like files among indexed chunks.
+            """
+            valid_methods = ["exact", "approximate", "lsh"]
+            if method not in valid_methods:
+                return json.dumps({"error": f"Invalid method. Choose from: {', '.join(valid_methods)}"})
+
+            try:
+                results = self.vector_db.search_docs(query, k=k, method=method)
+                return json.dumps({"results": results})
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        @self.mcp.tool()
+        def ask_repository_context(question: str, k: int = 5, method: str = "exact") -> str:
+            """
+            Retrieve the most relevant repository chunks to ground an answer externally.
+            """
+            valid_methods = ["exact", "approximate", "lsh"]
+            if method not in valid_methods:
+                return json.dumps({"error": f"Invalid method. Choose from: {', '.join(valid_methods)}"})
+
+            try:
+                result = self.vector_db.ask_repository_context(question, k=k, method=method)
+                return json.dumps(result)
             except Exception as e:
                 return json.dumps({"error": str(e)})
     
@@ -146,6 +328,30 @@ class MCPVectorDatabaseServer:
                 Cache Hit Ratio: {metrics.cache_hits/(metrics.cache_hits + metrics.cache_misses) if (metrics.cache_hits + metrics.cache_misses) > 0 else 0:.2f}
                 Cache Size: {metrics.cache_size/1024/1024:.2f} MB
             """
+
+        @self.mcp.resource("chunk://{key}")
+        def get_document_chunk(key: str) -> str:
+            chunk = self.vector_db.get_document_chunk(key)
+            if chunk is None:
+                return json.dumps({"error": f"Chunk with key {key} not found"})
+            return json.dumps({
+                "key": chunk.key,
+                "path": chunk.path,
+                "content": chunk.content,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "metadata": chunk.metadata,
+            })
+
+    def _register_http_routes(self):
+        @self.mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+        async def health_check(request):
+            return JSONResponse(self._server_status(), status_code=200)
+
+        @self.mcp.custom_route("/ready", methods=["GET"], include_in_schema=False)
+        async def ready_check(request):
+            status = self._server_status()
+            return JSONResponse(status, status_code=200 if status["ready"] else 503)
     
     def _register_prompts(self):
         """Register all MCP prompts"""
@@ -176,10 +382,12 @@ class MCPVectorDatabaseServer:
 
 
 # Create a global server instance
-db_path = os.environ.get("VECTOR_DB_PATH", ":memory:")
+db_path = os.environ.get("VECTOR_DB_PATH", "/data/vectors.duckdb")
 server = MCPVectorDatabaseServer(db_path)
 mcp = server.get_server()  # This is what the MCP client will look for
 
 # If run directly
 if __name__ == "__main__":
-    mcp.run()  # Use run() instead of start() 
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    mount_path = os.environ.get("MCP_MOUNT_PATH")
+    mcp.run(transport=transport, mount_path=mount_path)

@@ -1,0 +1,25 @@
+services:
+  vector-db-mcp:
+    image: vector-db-mcp-batch:latest
+    container_name: vector-db-mcp
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      MCP_TRANSPORT: streamable-http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+      MCP_STREAMABLE_HTTP_PATH: /mcp
+      VECTOR_DB_PATH: /data/vectors.duckdb
+      EMBEDDING_PROVIDER: hash
+    ports:
+      - "8765:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)); raise SystemExit(0 if data.get('ready') else 1)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 6
+    volumes:
+      - ./data:/data
+      - ./models:/models
+      - ..:/workspace

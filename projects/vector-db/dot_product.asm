@@ -1,6 +1,7 @@
 format ELF64
 public py_dot_product
 public py_vector_norm
+public py_squared_distance
 section '.text' executable
 
 py_dot_product:
@@ -41,4 +42,26 @@ loop_start_norm:
     add rdi, 8               ; Move to next element in vector
     loop loop_start_norm
     sqrtsd xmm0, xmm0         ; Calculate square root
+    ret
+
+py_squared_distance:
+    ; Calculate squared Euclidean distance between two vectors
+    ; Parameters:
+    ;   rdi: Pointer to the first vector
+    ;   rsi: Pointer to the second vector
+    ;   rdx: Length of the vectors
+    ; Returns:
+    ;   xmm0: Squared distance
+
+    xorpd xmm0, xmm0
+    mov rcx, rdx
+loop_start_squared_distance:
+    movsd xmm1, qword [rdi]
+    movsd xmm2, qword [rsi]
+    subsd xmm1, xmm2
+    mulsd xmm1, xmm1
+    addsd xmm0, xmm1
+    add rdi, 8
+    add rsi, 8
+    loop loop_start_squared_distance
     ret
