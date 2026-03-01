@@ -2,6 +2,8 @@ FROM --platform=linux/amd64 python:3.12-slim
 
 WORKDIR /app
 
+LABEL io.modelcontextprotocol.server.name="io.github.kroq86/vector-db-mcp"
+
 ARG PREWARM_EMBEDDINGS=0
 
 ENV PYTHONDONTWRITEBYTECODE=1

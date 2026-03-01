@@ -1,0 +1,84 @@
+name: Publish MCP Registry Metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Registry version to publish, for example 0.1.0"
+        required: true
+        type: string
+  push:
+    tags:
+      - "vector-db-v*"
+
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
+jobs:
+  publish-registry:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/vector-db
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#vector-db-v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for OCI image
+        shell: bash
+        run: |
+          IMAGE="ghcr.io/kroq86/vector-db-mcp:${{ steps.version.outputs.version }}"
+          for attempt in {1..30}; do
+            if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+              echo "Found $IMAGE"
+              exit 0
+            fi
+            echo "Waiting for $IMAGE to become available ($attempt/30)"
+            sleep 10
+          done
+          echo "Timed out waiting for $IMAGE" >&2
+          exit 1
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Set release version in server.json
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          jq --arg version "$VERSION" \
+             --arg identifier "ghcr.io/kroq86/vector-db-mcp:${VERSION}" \
+             '.version = $version | .packages[0].identifier = $identifier' \
+             server.json > server.json.tmp
+          mv server.json.tmp server.json
+          cat server.json
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server metadata
+        run: ./mcp-publisher publish
