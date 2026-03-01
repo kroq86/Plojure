@@ -1,0 +1,15 @@
+.git
+.gitignore
+.pytest_cache
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.duckdb
+*.png
+core/
+docs/
+examples/
+huggingface/
+tests/

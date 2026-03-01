@@ -170,8 +170,8 @@ def plot_metrics(metrics_list: List[SearchMetrics], labels: List[str], title: st
     plt.savefig(f'performance_{title}.png')
     plt.close()
 
-def test_embedding_type(db: DuckDBVectorDatabase, vectors: List[Tuple[str, List[float]]], 
-                       cluster_vectors: dict, k: int = 5) -> SearchMetrics:
+def evaluate_embedding_type(db: DuckDBVectorDatabase, vectors: List[Tuple[str, List[float]]], 
+                            cluster_vectors: dict, k: int = 5) -> SearchMetrics:
     """Test database performance for a specific type of embedding."""
     # Insert vectors
     db.batch_insert(vectors)
@@ -291,19 +291,19 @@ def main():
     
     # Test text embeddings
     print("\nTesting text embeddings...")
-    text_metrics = test_embedding_type(db, text_vectors, text_clusters, k)
+    text_metrics = evaluate_embedding_type(db, text_vectors, text_clusters, k)
     metrics_list.append(text_metrics)
     print(f"Text embeddings recall@{k}: {text_metrics.recall_at_k:.4f}")
     
     # Test image embeddings
     print("\nTesting image embeddings...")
-    image_metrics = test_embedding_type(db, image_vectors, image_clusters, k)
+    image_metrics = evaluate_embedding_type(db, image_vectors, image_clusters, k)
     metrics_list.append(image_metrics)
     print(f"Image embeddings recall@{k}: {image_metrics.recall_at_k:.4f}")
     
     # Test audio embeddings
     print("\nTesting audio embeddings...")
-    audio_metrics = test_embedding_type(db, audio_vectors, audio_clusters, k)
+    audio_metrics = evaluate_embedding_type(db, audio_vectors, audio_clusters, k)
     metrics_list.append(audio_metrics)
     print(f"Audio embeddings recall@{k}: {audio_metrics.recall_at_k:.4f}")
     
@@ -317,15 +317,15 @@ def main():
         metrics_list = []
         
         print(f"\nUsing {metric} similarity:")
-        text_metrics = test_embedding_type(db, text_vectors[:1000], {k: v[:1000] for k, v in text_clusters.items()}, k)
+        text_metrics = evaluate_embedding_type(db, text_vectors[:1000], {k: v[:1000] for k, v in text_clusters.items()}, k)
         metrics_list.append(text_metrics)
         print(f"Text embeddings recall@{k}: {text_metrics.recall_at_k:.4f}")
         
-        image_metrics = test_embedding_type(db, image_vectors[:1000], {k: v[:1000] for k, v in image_clusters.items()}, k)
+        image_metrics = evaluate_embedding_type(db, image_vectors[:1000], {k: v[:1000] for k, v in image_clusters.items()}, k)
         metrics_list.append(image_metrics)
         print(f"Image embeddings recall@{k}: {image_metrics.recall_at_k:.4f}")
         
-        audio_metrics = test_embedding_type(db, audio_vectors[:1000], {k: v[:1000] for k, v in audio_clusters.items()}, k)
+        audio_metrics = evaluate_embedding_type(db, audio_vectors[:1000], {k: v[:1000] for k, v in audio_clusters.items()}, k)
         metrics_list.append(audio_metrics)
         print(f"Audio embeddings recall@{k}: {audio_metrics.recall_at_k:.4f}")
         

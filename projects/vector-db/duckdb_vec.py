@@ -1,16 +1,14 @@
 import duckdb
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Callable, Literal
-import ctypes
 from ctypes import CDLL, POINTER, c_double, c_int
-import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
-import sys
 from collections import OrderedDict
-import random
 from dataclasses import dataclass
+from pathlib import Path
 import psutil
+import random
 import time
 
 @dataclass
@@ -105,32 +103,64 @@ class DuckDBVectorDatabase:
         self.chunk_size = chunk_size
         self.max_cache_size = max_cache_size
         self.similarity_metric = similarity_metric
-        self.load_library()
-        self._initialize_db()
         self._cache: OrderedDict[str, List[float]] = OrderedDict()
         self._cache_lock = Lock()
         self._current_cache_size = 0
         self.metrics = PerformanceMetrics()
         self.lsh_index = LSHIndex()
         self._vector_dimension = None
+        self.load_library()
+        self._initialize_db()
+        self._rebuild_lsh_index()
 
     def load_library(self):
-        try:
-            self.mylib = CDLL('./dot_product.so')
-            self.mylib.py_dot_product.argtypes = [POINTER(c_double), POINTER(c_double), c_int]
-            self.mylib.py_dot_product.restype = c_double
-            self.mylib.py_vector_norm.argtypes = [POINTER(c_double), c_int]
-            self.mylib.py_vector_norm.restype = c_double
-        except OSError:
-            # Fallback to pure Python implementation
-            self.mylib = None
+        library_paths = [
+            Path(__file__).resolve().with_name("dot_product.so"),
+            Path.cwd() / "dot_product.so",
+            Path(__file__).resolve().with_name("mylib.so"),
+            Path.cwd() / "mylib.so",
+        ]
+
+        self.mylib = None
+        for library_path in library_paths:
+            if not library_path.exists():
+                continue
+
+            try:
+                self.mylib = CDLL(str(library_path))
+                self.mylib.py_dot_product.argtypes = [POINTER(c_double), POINTER(c_double), c_int]
+                self.mylib.py_dot_product.restype = c_double
+                self.mylib.py_vector_norm.argtypes = [POINTER(c_double), c_int]
+                self.mylib.py_vector_norm.restype = c_double
+                break
+            except OSError:
+                self.mylib = None
 
     def _initialize_db(self):
-        # Drop existing indices first to avoid conflicts
-        self.conn.execute("DROP INDEX IF EXISTS idx_vectors_key")
-        self.conn.execute("DROP INDEX IF EXISTS idx_vectors_partition")
-        
-        # Drop and recreate table
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS vectors (
+                key VARCHAR PRIMARY KEY,
+                vector BLOB,
+                dimensions INTEGER,
+                partition_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_vectors_key ON vectors(key)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_vectors_partition ON vectors(partition_id)")
+
+    def _rebuild_lsh_index(self):
+        self.lsh_index = LSHIndex()
+        rows = self.conn.execute("""
+            SELECT key, vector, dimensions
+            FROM vectors
+        """).fetchall()
+
+        for key, vector_data, dimensions in rows:
+            vector = self._deserialize_vector(vector_data, dimensions)
+            self.lsh_index.insert(key, vector)
+
+    def reset_database(self):
         self.conn.execute("DROP TABLE IF EXISTS vectors")
         self.conn.execute("""
             CREATE TABLE vectors (
@@ -141,10 +171,10 @@ class DuckDBVectorDatabase:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Create indices after table
         self.conn.execute("CREATE INDEX idx_vectors_key ON vectors(key)")
         self.conn.execute("CREATE INDEX idx_vectors_partition ON vectors(partition_id)")
+        self.clear_cache()
+        self.lsh_index = LSHIndex()
 
     def _serialize_vector(self, vector: List[float]) -> bytes:
         return np.array(vector, dtype=np.float64).tobytes()
@@ -190,7 +220,12 @@ class DuckDBVectorDatabase:
         process = psutil.Process()
         self.metrics.memory_usage = process.memory_info().rss / 1024 / 1024  # MB
         self.metrics.cache_size = self._current_cache_size
-        self.metrics.total_vectors = self.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        totals = self.conn.execute("""
+            SELECT COUNT(*), COALESCE(SUM(dimensions), 0)
+            FROM vectors
+        """).fetchone()
+        self.metrics.total_vectors = totals[0]
+        self.metrics.total_dimensions = totals[1]
         return self.metrics
 
     def _calculate_similarity(self, v1: List[float], v2: List[float]) -> float:
@@ -479,10 +514,12 @@ class DuckDBVectorDatabase:
     def delete(self, key: str) -> bool:
         with self._cache_lock:
             self._cache.pop(key, None)
-        
+
         affected = self.conn.execute("""
             DELETE FROM vectors WHERE key = ?
         """, [key]).rowcount
+        if affected > 0:
+            self._rebuild_lsh_index()
         return affected > 0
 
     def get_all_keys(self) -> List[str]:

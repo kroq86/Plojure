@@ -1,9 +1,7 @@
 from mcp.server.fastmcp import FastMCP
-import numpy as np
-from typing import List, Dict, Tuple, Optional, Literal
+from typing import List
 import json
 import os
-from pathlib import Path
 
 from duckdb_vec import DuckDBVectorDatabase
 
@@ -25,26 +23,24 @@ class MCPVectorDatabaseServer:
         """Register all MCP tools"""
         
         @self.mcp.tool()
-        def vector_search(query_vector: List[float], k: int = 10, method: str = "hnsw") -> str:
+        def vector_search(query_vector: List[float], k: int = 10, method: str = "exact") -> str:
             """
             Search for similar vectors in the database
             
             Args:
                 query_vector: The vector to search for
                 k: Number of results to return
-                method: Search method ('exact', 'approximate', 'lsh', or 'hnsw')
+                method: Search method ('exact', 'approximate', or 'lsh')
             
             Returns:
                 JSON string with search results
             """
-            valid_methods = ["exact", "approximate", "lsh", "hnsw"]
+            valid_methods = ["exact", "approximate", "lsh"]
             if method not in valid_methods:
                 return json.dumps({"error": f"Invalid method. Choose from: {', '.join(valid_methods)}"})
-            
-            method_typed = method  # type: Literal["exact", "approximate", "lsh", "hnsw"]
-            
+
             try:
-                results = self.vector_db.search(query_vector, k, method_typed)
+                results = self.vector_db.search(query_vector, k, method)
                 return json.dumps({
                     "results": [{"key": key, "similarity": float(similarity)} for key, similarity in results]
                 })
