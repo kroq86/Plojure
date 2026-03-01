@@ -57,6 +57,13 @@ jobs:
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=vector-db-mcp
+            org.opencontainers.image.description=Assembly-accelerated DuckDB MCP server for code search, indexing, and symbol lookup.
+            org.opencontainers.image.source=https://github.com/kroq86/Plojure
+            org.opencontainers.image.url=https://github.com/kroq86/Plojure/tree/hybrid/projects/vector-db
+            org.opencontainers.image.documentation=https://github.com/kroq86/Plojure/tree/hybrid/projects/vector-db
+            org.opencontainers.image.licenses=MIT
 
       - name: Build and push image
         uses: docker/build-push-action@v6
