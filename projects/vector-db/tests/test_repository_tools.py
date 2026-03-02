@@ -1,4 +1,5 @@
 from duckdb_vec import DuckDBVectorDatabase
+import numpy as np
 
 
 def test_upsert_and_search_document_chunk():
@@ -257,3 +258,113 @@ def test_search_symbols_finds_cpp_namespace_struct_and_method(tmp_path):
     assert struct_results[0]["matched_symbols"] == ["engine"]
     assert method_results
     assert method_results[0]["matched_symbols"] == ["score"]
+
+
+def test_native_lsh_hash_matches_numpy_path():
+    db = DuckDBVectorDatabase(":memory:", embedding_provider="hash", use_asm=True)
+    projections = np.ascontiguousarray(
+        np.array(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0, 0.0],
+                [-1.0, 0.5, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+    )
+    vector = [0.25, 0.75, 0.0, 0.0]
+
+    native = db._hash_vector_native_f32(vector, projections)
+    normalized = np.asarray(vector, dtype=np.float64)
+    normalized /= np.linalg.norm(normalized)
+    expected = (projections.astype(np.float64) @ normalized > 0).astype(int).tolist()
+
+    assert native == expected
+
+
+def test_float32_partition_topk_matches_numpy_order():
+    db_asm = DuckDBVectorDatabase(":memory:", embedding_provider="hash", use_asm=True, similarity_metric="cosine")
+    db_py = DuckDBVectorDatabase(":memory:", embedding_provider="hash", use_asm=False, similarity_metric="cosine")
+
+    vectors = [
+        ("a", [1.0, 0.0, 0.0, 0.0]),
+        ("b", [0.8, 0.2, 0.0, 0.0]),
+        ("c", [0.0, 1.0, 0.0, 0.0]),
+        ("d", [0.6, 0.6, 0.0, 0.0]),
+    ]
+    rows = [(key, db_asm._serialize_vector(vec), len(vec)) for key, vec in vectors]
+    batch = db_asm._build_partition_batch(rows)
+    query = [1.0, 0.1, 0.0, 0.0]
+
+    native = db_asm._topk_partition_batch(batch, query, 3)
+    python = db_py._topk_partition_batch(batch, query, 3)
+
+    assert [key for key, _ in native] == [key for key, _ in python]
+
+
+def test_index_repository_excludes_core_directory(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text(
+        "def live_symbol():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    core_dir = repo / "core"
+    core_dir.mkdir()
+    (core_dir / "main.py").write_text(
+        "def stale_symbol():\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+
+    db = DuckDBVectorDatabase(":memory:", embedding_provider="hash")
+    db.index_repository(str(repo))
+
+    assert db.search_symbols("live_symbol", k=3)
+    assert db.search_symbols("stale_symbol", k=3) == []
+
+
+def test_index_repository_skips_duplicate_content(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    content = (
+        "def duplicate_symbol():\n"
+        "    return 'same'\n"
+    )
+    (repo / "one.py").write_text(content, encoding="utf-8")
+    nested = repo / "nested"
+    nested.mkdir()
+    (nested / "two.py").write_text(content, encoding="utf-8")
+
+    db = DuckDBVectorDatabase(":memory:", embedding_provider="hash")
+    result = db.index_repository(str(repo))
+    matches = db.search_symbols("duplicate_symbol", k=10)
+
+    assert result["indexed_files"] == 1
+    assert result["skipped_files"] >= 1
+    assert len(matches) == 1
+
+
+def test_semantic_search_approximate_handles_mixed_vector_dimensions(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text(
+        "def stable_search():\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+
+    db = DuckDBVectorDatabase(":memory:", embedding_provider="hash")
+    db.index_repository(str(repo))
+    db.insert("legacy-fastembed-vector", [0.1, 0.2, 0.3])
+
+    results = db.search_document_chunks(
+        "stable_search",
+        k=3,
+        method="approximate",
+    )
+
+    assert results
+    assert any(result["path"] == "main.py" for result in results)

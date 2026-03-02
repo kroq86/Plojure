@@ -1,13 +1,14 @@
 import duckdb
 import numpy as np
-from typing import List, Tuple, Optional, Dict, Callable, Literal, Set
-from ctypes import CDLL, POINTER, c_double, c_int
+from typing import List, Tuple, Optional, Dict, Callable, Literal, Set, Union
+from ctypes import CDLL, POINTER, c_double, c_float, c_int, c_ubyte
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import heapq
 import json
 import os
 import psutil
@@ -60,16 +61,21 @@ class ChunkSymbol:
 class PartitionBatch:
     keys: List[str]
     matrix: np.ndarray
+    dimensions: int
     normalized_matrix: Optional[np.ndarray] = None
+    matrix_f32: Optional[np.ndarray] = None
+    normalized_matrix_f32: Optional[np.ndarray] = None
 
 class LSHIndex:
     def __init__(self, num_hash_functions: int = 20, num_bands: int = 10):
         self.num_hash_functions = num_hash_functions
         self.num_bands = num_bands
         self.hash_ranges = None
+        self.hash_ranges_f32 = None
         self.dimensions = None
         self.bucket_dict: Dict[int, List[str]] = {}
         self.vector_count = 0
+        self._native_signatures = None
     
     def _initialize_hash_ranges(self, dimensions: int):
         if self.dimensions != dimensions:
@@ -78,11 +84,17 @@ class LSHIndex:
             self.hash_ranges = np.random.normal(0, 1, (self.num_hash_functions, dimensions))
             # Normalize the hash ranges
             self.hash_ranges /= np.linalg.norm(self.hash_ranges, axis=1)[:, np.newaxis]
+            self.hash_ranges_f32 = np.ascontiguousarray(self.hash_ranges.astype(np.float32))
+
+    def set_native_signatures(self, callback: Optional[Callable[[List[float], np.ndarray], List[int]]]) -> None:
+        self._native_signatures = callback
     
     def _hash_vector(self, vector: List[float]) -> List[int]:
-        vector_array = np.array(vector, dtype=np.float64)
         if self.hash_ranges is None or self.dimensions != len(vector):
             self._initialize_hash_ranges(len(vector))
+        if self._native_signatures is not None and self.hash_ranges_f32 is not None:
+            return self._native_signatures(vector, self.hash_ranges_f32)
+        vector_array = np.array(vector, dtype=np.float64)
         # Normalize the input vector
         vector_array /= np.linalg.norm(vector_array)
         projections = np.dot(self.hash_ranges, vector_array)
@@ -150,12 +162,13 @@ class DuckDBVectorDatabase:
         self._sentence_transformer = None
         self._cache: OrderedDict[str, List[float]] = OrderedDict()
         self._cache_lock = Lock()
-        self._partition_batches: Dict[int, PartitionBatch] = {}
+        self._partition_batches: Dict[Tuple[int, int], PartitionBatch] = {}
         self._partition_batch_lock = Lock()
         self._write_lock = threading.RLock()
         self._current_cache_size = 0
         self.metrics = PerformanceMetrics()
         self.lsh_index = LSHIndex()
+        self.lsh_index.set_native_signatures(self._hash_vector_native_f32)
         self._vector_dimension = None
         self._initialize_embedding_backend()
         self.load_library()
@@ -241,6 +254,18 @@ class DuckDBVectorDatabase:
                     POINTER(c_double), POINTER(c_double), c_int, c_int, POINTER(c_double)
                 ]
                 self.mylib.py_batch_euclidean_scores.restype = None
+                self.mylib.py_batch_topk_scores.argtypes = [
+                    POINTER(c_double), POINTER(c_double), c_int, c_int, c_int, c_int, POINTER(c_int), POINTER(c_double)
+                ]
+                self.mylib.py_batch_topk_scores.restype = c_int
+                self.mylib.py_batch_topk_scores_f32.argtypes = [
+                    POINTER(c_float), POINTER(c_float), c_int, c_int, c_int, c_int, POINTER(c_int), POINTER(c_double)
+                ]
+                self.mylib.py_batch_topk_scores_f32.restype = c_int
+                self.mylib.py_lsh_signatures_f32.argtypes = [
+                    POINTER(c_float), POINTER(c_float), c_int, c_int, POINTER(c_ubyte)
+                ]
+                self.mylib.py_lsh_signatures_f32.restype = None
                 break
             except OSError:
                 self.mylib = None
@@ -297,6 +322,7 @@ class DuckDBVectorDatabase:
 
     def _rebuild_lsh_index(self):
         self.lsh_index = LSHIndex()
+        self.lsh_index.set_native_signatures(self._hash_vector_native_f32)
         rows = self.conn.execute("""
             SELECT key, vector, dimensions
             FROM vectors
@@ -360,6 +386,7 @@ class DuckDBVectorDatabase:
         self.conn.execute("CREATE INDEX idx_chunk_symbols_path ON chunk_symbols(path)")
         self.clear_cache()
         self.lsh_index = LSHIndex()
+        self.lsh_index.set_native_signatures(self._hash_vector_native_f32)
         self._invalidate_partition_batch()
 
     def _serialize_vector(self, vector: List[float]) -> bytes:
@@ -620,12 +647,27 @@ class DuckDBVectorDatabase:
                 if self._current_cache_size <= target_size:
                     break
 
-    def _invalidate_partition_batch(self, partition_id: Optional[int] = None):
+    def _invalidate_partition_batch(
+        self,
+        partition_id: Optional[int] = None,
+        dimensions: Optional[int] = None,
+    ):
         with self._partition_batch_lock:
-            if partition_id is None:
+            if partition_id is None and dimensions is None:
                 self._partition_batches.clear()
-            else:
-                self._partition_batches.pop(partition_id, None)
+                return
+
+            keys_to_delete = []
+            for cache_key in self._partition_batches:
+                cache_partition_id, cache_dimensions = cache_key
+                if partition_id is not None and cache_partition_id != partition_id:
+                    continue
+                if dimensions is not None and cache_dimensions != dimensions:
+                    continue
+                keys_to_delete.append(cache_key)
+
+            for cache_key in keys_to_delete:
+                self._partition_batches.pop(cache_key, None)
 
     def _set_cached_vector(self, key: str, vector: List[float]):
         with self._cache_lock:
@@ -645,9 +687,44 @@ class DuckDBVectorDatabase:
         normalized[~non_zero] = 0.0
         return normalized
 
+    def _normalize_matrix_rows_f32(self, matrix: np.ndarray) -> np.ndarray:
+        normalized = np.array(matrix, dtype=np.float32, copy=True, order="C")
+        norms = np.linalg.norm(normalized, axis=1)
+        non_zero = norms != 0
+        normalized[non_zero] /= norms[non_zero, np.newaxis]
+        normalized[~non_zero] = 0.0
+        return normalized
+
+    def _hash_vector_native_f32(self, vector: List[float], projections: np.ndarray) -> List[int]:
+        if self.mylib is None:
+            vector_array = np.asarray(vector, dtype=np.float64)
+            norm = np.linalg.norm(vector_array)
+            if norm == 0:
+                return [0 for _ in range(projections.shape[0])]
+            normalized = vector_array / norm
+            return (np.asarray(projections, dtype=np.float64) @ normalized > 0).astype(int).tolist()
+
+        vector_np = np.ascontiguousarray(np.asarray(vector, dtype=np.float32))
+        projections_np = np.ascontiguousarray(projections, dtype=np.float32)
+        output = np.empty(projections_np.shape[0], dtype=np.uint8)
+        self.mylib.py_lsh_signatures_f32(
+            vector_np.ctypes.data_as(POINTER(c_float)),
+            projections_np.ctypes.data_as(POINTER(c_float)),
+            projections_np.shape[0],
+            projections_np.shape[1],
+            output.ctypes.data_as(POINTER(c_ubyte)),
+        )
+        return output.astype(np.int32).tolist()
+
     def _build_partition_batch(self, rows: List[Tuple[str, bytes, int]]) -> PartitionBatch:
+        if not rows:
+            empty64 = np.empty((0, 0), dtype=np.float64)
+            empty32 = np.empty((0, 0), dtype=np.float32)
+            return PartitionBatch(keys=[], matrix=empty64, dimensions=0, matrix_f32=empty32)
+
         keys: List[str] = []
         vectors: List[List[float]] = []
+        dimensions = rows[0][2]
         for key, vector_data, dimensions in rows:
             vector = self._get_cached_vector(key)
             if vector is None:
@@ -657,19 +734,26 @@ class DuckDBVectorDatabase:
             vectors.append(vector)
 
         matrix = np.ascontiguousarray(np.asarray(vectors, dtype=np.float64))
+        matrix_f32 = np.ascontiguousarray(matrix.astype(np.float32))
         normalized_matrix = None
+        normalized_matrix_f32 = None
         if self.similarity_metric == "cosine":
             normalized_matrix = self._normalize_matrix_rows(matrix)
+            normalized_matrix_f32 = self._normalize_matrix_rows_f32(matrix_f32)
 
         return PartitionBatch(
             keys=keys,
             matrix=matrix,
+            dimensions=dimensions,
             normalized_matrix=normalized_matrix,
+            matrix_f32=matrix_f32,
+            normalized_matrix_f32=normalized_matrix_f32,
         )
 
-    def _get_partition_batch(self, partition_id: int) -> PartitionBatch:
+    def _get_partition_batch(self, partition_id: int, dimensions: int) -> PartitionBatch:
+        cache_key = (partition_id, dimensions)
         with self._partition_batch_lock:
-            cached_batch = self._partition_batches.get(partition_id)
+            cached_batch = self._partition_batches.get(cache_key)
         if cached_batch is not None:
             return cached_batch
 
@@ -677,10 +761,11 @@ class DuckDBVectorDatabase:
             SELECT key, vector, dimensions
             FROM vectors
             WHERE partition_id = ?
-        """, [partition_id]).fetchall()
+              AND dimensions = ?
+        """, [partition_id, dimensions]).fetchall()
         batch = self._build_partition_batch(rows)
         with self._partition_batch_lock:
-            self._partition_batches[partition_id] = batch
+            self._partition_batches[cache_key] = batch
         return batch
 
     def get_metrics(self) -> PerformanceMetrics:
@@ -764,7 +849,12 @@ class DuckDBVectorDatabase:
 
         return matrix @ query_np
 
-    def _score_matrix_native(self, query_vector: List[float], matrix: np.ndarray) -> np.ndarray:
+    def _score_matrix_native(
+        self,
+        query_vector: List[float],
+        matrix: np.ndarray,
+        metric_override: Optional[Literal["cosine", "euclidean", "dot_product"]] = None,
+    ) -> np.ndarray:
         query_np = np.ascontiguousarray(np.asarray(query_vector, dtype=np.float64))
         matrix_np = np.ascontiguousarray(matrix, dtype=np.float64)
         output = np.empty(matrix_np.shape[0], dtype=np.float64)
@@ -773,15 +863,114 @@ class DuckDBVectorDatabase:
         matrix_ptr = matrix_np.ctypes.data_as(POINTER(c_double))
         output_ptr = output.ctypes.data_as(POINTER(c_double))
         num_vectors, dimensions = matrix_np.shape
+        metric = metric_override or self.similarity_metric
 
-        if self.similarity_metric == "cosine":
+        if metric == "cosine":
             self.mylib.py_batch_cosine_scores(query_ptr, matrix_ptr, num_vectors, dimensions, output_ptr)
-        elif self.similarity_metric == "euclidean":
+        elif metric == "euclidean":
             self.mylib.py_batch_euclidean_scores(query_ptr, matrix_ptr, num_vectors, dimensions, output_ptr)
         else:
             self.mylib.py_batch_dot_product_scores(query_ptr, matrix_ptr, num_vectors, dimensions, output_ptr)
 
         return output
+
+    def _metric_code(
+        self,
+        metric_override: Optional[Literal["cosine", "euclidean", "dot_product"]] = None,
+    ) -> int:
+        metric = metric_override or self.similarity_metric
+        if metric == "cosine":
+            return 0
+        if metric == "euclidean":
+            return 1
+        return 2
+
+    def _select_topk_scores(
+        self,
+        keys: List[str],
+        scores: np.ndarray,
+        k: int,
+    ) -> List[Tuple[str, float]]:
+        if k <= 0 or not keys:
+            return []
+
+        limit = min(k, len(keys))
+        if limit == len(keys):
+            order = np.argsort(scores)[::-1]
+        else:
+            candidate_indices = np.argpartition(scores, -limit)[-limit:]
+            order = candidate_indices[np.argsort(scores[candidate_indices])[::-1]]
+        return [(keys[int(idx)], float(scores[int(idx)])) for idx in order]
+
+    def _score_topk_native(
+        self,
+        query_vector: List[float],
+        matrix: np.ndarray,
+        keys: List[str],
+        k: int,
+        metric_override: Optional[Literal["cosine", "euclidean", "dot_product"]] = None,
+    ) -> List[Tuple[str, float]]:
+        if k <= 0 or matrix.size == 0 or not keys:
+            return []
+
+        query_np = np.ascontiguousarray(np.asarray(query_vector, dtype=np.float64))
+        matrix_np = np.ascontiguousarray(matrix, dtype=np.float64)
+        limit = min(k, matrix_np.shape[0])
+        indices = np.full(limit, -1, dtype=np.int32)
+        scores = np.full(limit, -np.inf, dtype=np.float64)
+
+        query_ptr = query_np.ctypes.data_as(POINTER(c_double))
+        matrix_ptr = matrix_np.ctypes.data_as(POINTER(c_double))
+        indices_ptr = indices.ctypes.data_as(POINTER(c_int))
+        scores_ptr = scores.ctypes.data_as(POINTER(c_double))
+        count = self.mylib.py_batch_topk_scores(
+            query_ptr,
+            matrix_ptr,
+            matrix_np.shape[0],
+            matrix_np.shape[1],
+            self._metric_code(metric_override),
+            limit,
+            indices_ptr,
+            scores_ptr,
+        )
+        return [
+            (keys[int(indices[i])], float(scores[i]))
+            for i in range(count)
+            if indices[i] >= 0
+        ]
+
+    def _score_topk_native_f32(
+        self,
+        query_vector: List[float],
+        matrix: np.ndarray,
+        keys: List[str],
+        k: int,
+        metric_override: Optional[Literal["cosine", "euclidean", "dot_product"]] = None,
+    ) -> List[Tuple[str, float]]:
+        if k <= 0 or matrix.size == 0 or not keys:
+            return []
+
+        query_np = np.ascontiguousarray(np.asarray(query_vector, dtype=np.float32))
+        matrix_np = np.ascontiguousarray(matrix, dtype=np.float32)
+        limit = min(k, matrix_np.shape[0])
+        indices = np.full(limit, -1, dtype=np.int32)
+        scores = np.full(limit, -np.inf, dtype=np.float64)
+
+        count = self.mylib.py_batch_topk_scores_f32(
+            query_np.ctypes.data_as(POINTER(c_float)),
+            matrix_np.ctypes.data_as(POINTER(c_float)),
+            matrix_np.shape[0],
+            matrix_np.shape[1],
+            self._metric_code(metric_override),
+            limit,
+            indices.ctypes.data_as(POINTER(c_int)),
+            scores.ctypes.data_as(POINTER(c_double)),
+        )
+        return [
+            (keys[int(indices[i])], float(scores[i]))
+            for i in range(count)
+            if indices[i] >= 0
+        ]
 
     def _score_partition_batch(self, batch: PartitionBatch, query_vector: List[float]) -> List[Tuple[str, float]]:
         if batch.matrix.size == 0:
@@ -795,7 +984,11 @@ class DuckDBVectorDatabase:
             else:
                 normalized_query = np.ascontiguousarray(query_np / query_norm, dtype=np.float64)
                 if self.mylib is not None:
-                    scores = self._score_matrix_native(normalized_query.tolist(), batch.normalized_matrix)
+                    scores = self._score_matrix_native(
+                        normalized_query.tolist(),
+                        batch.normalized_matrix,
+                        metric_override="dot_product",
+                    )
                 else:
                     scores = batch.normalized_matrix @ normalized_query
         else:
@@ -806,10 +999,58 @@ class DuckDBVectorDatabase:
 
         return list(zip(batch.keys, scores.tolist()))
 
+    def _topk_partition_batch(
+        self,
+        batch: PartitionBatch,
+        query_vector: List[float],
+        k: int,
+    ) -> List[Tuple[str, float]]:
+        if batch.matrix.size == 0 or k <= 0:
+            return []
+        if batch.dimensions and batch.dimensions != len(query_vector):
+            return []
+
+        if self.similarity_metric == "cosine" and batch.normalized_matrix is not None:
+            query_np = np.asarray(query_vector, dtype=np.float64)
+            query_norm = np.linalg.norm(query_np)
+            if query_norm == 0:
+                return [(key, 0.0) for key in batch.keys[: min(k, len(batch.keys))]]
+            if self.mylib is not None and batch.normalized_matrix_f32 is not None:
+                normalized_query_f32 = np.ascontiguousarray(query_np / query_norm, dtype=np.float32)
+                return self._score_topk_native_f32(
+                    normalized_query_f32.tolist(),
+                    batch.normalized_matrix_f32,
+                    batch.keys,
+                    k,
+                    metric_override="dot_product",
+                )
+            normalized_query = np.ascontiguousarray(query_np / query_norm, dtype=np.float64)
+            if self.mylib is not None:
+                return self._score_topk_native(
+                    normalized_query.tolist(),
+                    batch.normalized_matrix,
+                    batch.keys,
+                    k,
+                    metric_override="dot_product",
+                )
+            scores = batch.normalized_matrix @ normalized_query
+            return self._select_topk_scores(batch.keys, scores, k)
+
+        if self.mylib is not None and batch.matrix_f32 is not None:
+            return self._score_topk_native_f32(query_vector, batch.matrix_f32, batch.keys, k)
+
+        if self.mylib is not None:
+            return self._score_topk_native(query_vector, batch.matrix, batch.keys, k)
+
+        scores = self._score_matrix_numpy(query_vector, batch.matrix)
+        return self._select_topk_scores(batch.keys, scores, k)
+
     def _process_partition_batch(self, partition_vectors: List[Tuple[str, bytes, int]], query_vector: List[float]) -> List[Tuple[str, float]]:
         if not partition_vectors:
             return []
         batch = self._build_partition_batch(partition_vectors)
+        if batch.dimensions and batch.dimensions != len(query_vector):
+            return []
         return self._score_partition_batch(batch, query_vector)
 
     def insert(self, key: str, vector: List[float], partition_id: Optional[int] = None) -> None:
@@ -822,7 +1063,7 @@ class DuckDBVectorDatabase:
             VALUES (?, ?, ?, ?)
         """, [key, vector_data, len(vector), partition_id])
         self._set_cached_vector(key, vector)
-        self._invalidate_partition_batch(partition_id)
+        self._invalidate_partition_batch(partition_id, len(vector))
         self.lsh_index.insert(key, vector)
 
     def upsert_document_chunk(
@@ -949,6 +1190,21 @@ class DuckDBVectorDatabase:
         self._rebuild_lsh_index()
         return len(keys)
 
+    def delete_chunks_by_prefix(self, prefix: str) -> int:
+        normalized_prefix = prefix.strip("/").replace("\\", "/")
+        if not normalized_prefix:
+            return 0
+
+        rows = self.conn.execute("""
+            SELECT DISTINCT path
+            FROM document_chunks
+            WHERE path = ? OR path LIKE ?
+        """, [normalized_prefix, f"{normalized_prefix}/%"]).fetchall()
+        deleted = 0
+        for (path,) in rows:
+            deleted += self.delete_chunks_by_path(path)
+        return deleted
+
     def search_document_chunks(
         self,
         query: str,
@@ -1031,6 +1287,20 @@ class DuckDBVectorDatabase:
             target = raw_target if raw_target.is_absolute() else root / raw_target
             target = target.resolve()
         return root, target
+
+    def _default_allowed_extensions(self) -> Set[str]:
+        return {
+            ".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".ts", ".tsx",
+            ".js", ".jsx", ".rs", ".go", ".java", ".c", ".h", ".cpp", ".hpp",
+            ".asm", ".sh", ".lisp", ".clj", ".sql",
+        }
+
+    def _default_excluded_dirs(self) -> Set[str]:
+        return {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", "core"}
+
+    def _is_excluded_relative_path(self, relative_path: str, excluded_dirs: Set[str]) -> bool:
+        parts = Path(relative_path).parts
+        return any(part in excluded_dirs for part in parts[:-1])
 
     def _index_file(self, file_path: Path, root: Path, chunk_size_lines: int, overlap_lines: int) -> Tuple[int, bool]:
         relative_path = str(file_path.relative_to(root))
@@ -1124,25 +1394,41 @@ class DuckDBVectorDatabase:
         if not root.is_dir():
             raise NotADirectoryError(f"Path is not a directory: {root}")
 
-        allowed_extensions = set(include_extensions or [
-            ".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".ts", ".tsx",
-            ".js", ".jsx", ".rs", ".go", ".java", ".c", ".h", ".cpp", ".hpp",
-            ".asm", ".sh", ".lisp", ".clj", ".sql",
-        ])
-        excluded_dirs = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache"}
+        allowed_extensions = set(include_extensions or self._default_allowed_extensions())
+        excluded_dirs = self._default_excluded_dirs()
 
         with self._write_lock:
+            for excluded_dir in excluded_dirs:
+                self.delete_chunks_by_prefix(excluded_dir)
+
             indexed_files = 0
             indexed_chunks = 0
             skipped_files = 0
+            seen_content_hashes: Dict[str, str] = {}
             for current_root, dirnames, filenames in os.walk(root):
                 dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dirs]
                 for filename in filenames:
                     file_path = Path(current_root) / filename
+                    relative_path = str(file_path.relative_to(root))
+                    if self._is_excluded_relative_path(relative_path, excluded_dirs):
+                        self.delete_chunks_by_path(relative_path)
+                        skipped_files += 1
+                        continue
                     if allowed_extensions and file_path.suffix.lower() not in allowed_extensions:
                         continue
                     if file_path.stat().st_size > max_file_size_bytes:
                         continue
+
+                    try:
+                        content_hash = hashlib.blake2b(file_path.read_bytes(), digest_size=16).hexdigest()
+                    except OSError:
+                        continue
+                    existing_path = seen_content_hashes.get(content_hash)
+                    if existing_path is not None:
+                        self.delete_chunks_by_path(relative_path)
+                        skipped_files += 1
+                        continue
+                    seen_content_hashes[content_hash] = relative_path
 
                     file_chunks, skipped = self._index_file(file_path, root, chunk_size_lines, overlap_lines)
                     if skipped:
@@ -1168,17 +1454,18 @@ class DuckDBVectorDatabase:
         if target is None or not target.exists():
             raise FileNotFoundError(f"Path does not exist: {target_path}")
 
-        allowed_extensions = set(include_extensions or [
-            ".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".ts", ".tsx",
-            ".js", ".jsx", ".rs", ".go", ".java", ".c", ".h", ".cpp", ".hpp",
-            ".asm", ".sh", ".lisp", ".clj", ".sql",
-        ])
+        allowed_extensions = set(include_extensions or self._default_allowed_extensions())
+        excluded_dirs = self._default_excluded_dirs()
 
         with self._write_lock:
             indexed_files = 0
             indexed_chunks = 0
             skipped_files = 0
             if target.is_file():
+                relative_path = str(target.relative_to(root))
+                if self._is_excluded_relative_path(relative_path, excluded_dirs):
+                    self.delete_chunks_by_path(relative_path)
+                    return {"indexed_files": 0, "indexed_chunks": 0, "skipped_files": 1}
                 if target.suffix.lower() in allowed_extensions:
                     file_chunks, skipped = self._index_file(target, root, chunk_size_lines, overlap_lines)
                     if skipped:
@@ -1321,22 +1608,22 @@ class DuckDBVectorDatabase:
     def _exact_search(self, query_vector: List[float], k: int, num_threads: int = 4) -> List[Tuple[str, float]]:
         all_partitions = self.conn.execute("""
             SELECT DISTINCT partition_id FROM vectors
-        """).fetchall()
+            WHERE dimensions = ?
+        """, [len(query_vector)]).fetchall()
         
         all_similarities = []
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = []
             
             for (partition_id,) in all_partitions:
-                partition_batch = self._get_partition_batch(partition_id)
-                future = executor.submit(self._score_partition_batch, partition_batch, query_vector)
+                partition_batch = self._get_partition_batch(partition_id, len(query_vector))
+                future = executor.submit(self._topk_partition_batch, partition_batch, query_vector, k)
                 futures.append(future)
             
             for future in futures:
                 all_similarities.extend(future.result())
-        
-        all_similarities.sort(key=lambda x: x[1], reverse=True)
-        return all_similarities[:k]
+
+        return heapq.nlargest(k, all_similarities, key=lambda item: item[1])
 
     def lsh_search(self, query_vector: List[float], k: int) -> List[Tuple[str, float]]:
         # Get candidates from LSH with increased min_candidates
@@ -1364,16 +1651,18 @@ class DuckDBVectorDatabase:
                 SELECT key, vector, dimensions 
                 FROM vectors 
                 WHERE key IN ({placeholders})
-            """, batch_keys).fetchall()
+                  AND dimensions = ?
+            """, [*batch_keys, len(query_vector)]).fetchall()
             
-            similarities.extend(self._process_partition_batch(vectors_data, query_vector))
+            batch = self._build_partition_batch(vectors_data)
+            similarities.extend(self._topk_partition_batch(batch, query_vector, max(k * 4, k)))
             
             # Early stopping if we have enough good candidates
-            similarities.sort(key=lambda x: x[1], reverse=True)
-            if len(similarities) >= k * 10 and similarities[k-1][1] > 0.5:
+            similarities = heapq.nlargest(max(k * 10, k), similarities, key=lambda item: item[1])
+            if len(similarities) >= k and similarities[k-1][1] > 0.5:
                 break
         
-        return similarities[:k]
+        return heapq.nlargest(k, similarities, key=lambda item: item[1])
 
     def batch_insert(self, vectors: List[Tuple[str, List[float]]], partition_size: Optional[int] = None) -> None:
         if partition_size is None:
@@ -1397,7 +1686,8 @@ class DuckDBVectorDatabase:
                     VALUES (?, ?, ?, ?)
                 """, data)
                 for partition_id in affected_partitions:
-                    self._invalidate_partition_batch(partition_id)
+                    for _, vec in batch:
+                        self._invalidate_partition_batch(partition_id, len(vec))
             
             self.conn.execute("COMMIT")
             self._rebuild_lsh_index()
@@ -1406,7 +1696,13 @@ class DuckDBVectorDatabase:
             raise Exception(f"Batch insert failed: {str(e)}")
 
     def approximate_search(self, query_vector: List[float], k: int, sample_size: int) -> List[Tuple[str, float]]:
-        total_vectors = self.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        dimensions = len(query_vector)
+        total_vectors = self.conn.execute(
+            "SELECT COUNT(*) FROM vectors WHERE dimensions = ?",
+            [dimensions],
+        ).fetchone()[0]
+        if total_vectors == 0:
+            return []
         
         # Adaptive sampling based on dataset size
         if total_vectors < 50000:
@@ -1423,6 +1719,7 @@ class DuckDBVectorDatabase:
                        COUNT(*) OVER (PARTITION BY partition_id) as partition_size,
                        SUM(1) OVER () as total_vectors
                 FROM vectors
+                WHERE dimensions = ?
             ),
             ranked_vectors AS (
                 SELECT v.key, v.vector, v.dimensions,
@@ -1430,6 +1727,7 @@ class DuckDBVectorDatabase:
                        p.partition_size
                 FROM vectors v
                 JOIN partitions p ON v.partition_id = p.partition_id
+                WHERE v.dimensions = ?
             )
             SELECT key, vector, dimensions
             FROM ranked_vectors
@@ -1438,16 +1736,16 @@ class DuckDBVectorDatabase:
                OR RANDOM() <= 0.05  -- Random sampling for diversity
             LIMIT ?
         """, [
+            dimensions,
+            dimensions,
             sample_ratio,
             k * 2,  # Take more from small partitions
             k * 4,  # Small partition threshold
             max(sample_size * 2, k * 100)  # Ensure enough samples
         ]).fetchall()
         
-        similarities = self._process_partition_batch(sampled_vectors, query_vector)
-
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        return similarities[:k]
+        batch = self._build_partition_batch(sampled_vectors)
+        return self._topk_partition_batch(batch, query_vector, k)
 
     def delete(self, key: str) -> bool:
         with self._cache_lock:

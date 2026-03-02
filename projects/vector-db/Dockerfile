@@ -31,8 +31,8 @@ RUN if [ "$PREWARM_EMBEDDINGS" = "1" ]; then \
 COPY dot_product.asm ./
 COPY wrapper.c ./
 RUN fasm dot_product.asm dot_product.o && \
-    gcc -c -fPIC wrapper.c -o wrapper.o && \
-    gcc -shared -fPIC -o dot_product.so dot_product.o wrapper.o
+    gcc -O3 -c -fPIC wrapper.c -o wrapper.o && \
+    gcc -O3 -shared -fPIC -o dot_product.so dot_product.o wrapper.o
 
 COPY duckdb_vec.py ./
 COPY mcp_vector_server.py ./
