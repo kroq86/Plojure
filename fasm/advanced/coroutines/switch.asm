@@ -184,7 +184,7 @@ generator_switch_context:
 .not_fresh:
     ; Restore from saved state
     mov rdi, [rdi + Generator.rsp]        ; Get saved rsp
-    mov rsi, rax                          ; Set return value
+    ; rsi already contains resume argument from generator_next.
     
     ; Restore registers
     pop r15
@@ -199,6 +199,8 @@ generator_return:
     ; Set up stack frame
     push rbp
     mov rbp, rsp
+    ; Preserve yielded generator stack snapshot (passed in rsi).
+    mov r8, rsi
     
     ; Save rsp in current generator (index count-1)
     mov rax, [generator_stack]
@@ -219,7 +221,9 @@ generator_return:
     dec rax                                ; Get index of previous generator
     mov rdx, [rcx + rax*8]                 ; Get previous generator
     mov rdi, [rdx + Generator.rsp]         ; Get its saved rsp
-    mov rsi, [rbp - 8]                     ; Get yield value from stack
+    ; Yielded value layout in generator_yield:
+    ; [r8+0]=r15 [r8+8]=r14 [r8+16]=r13 [r8+24]=r12 [r8+32]=rbx [r8+40]=yield
+    mov rsi, [r8 + 40]                     ; Return yielded value to caller
     
     mov rsp, rbp                           ; Restore stack frame
     pop rbp
@@ -254,4 +258,3 @@ generator__finish_current:
     mov rsp, rbp                          ; Restore stack frame
     pop rbp
     jmp generator_restore_context_with_return
-

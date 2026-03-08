@@ -1,0 +1,99 @@
+#!/bin/bash
+set -euo pipefail
+
+IMAGE="${DOTFASM_IMAGE:-plojure-fasm-amd64:latest}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./dotfasm <file.asm> [output]
+  ./dotfasm run <file.asm> [output]
+  ./dotfasm shell
+USAGE
+}
+
+ensure_image() {
+  if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "[dotfasm] Building local image $IMAGE (one-time setup)..."
+  docker rm -f plojure-fasm-bootstrap >/dev/null 2>&1 || true
+  docker run --name plojure-fasm-bootstrap --platform linux/amd64 debian:bookworm-slim \
+    bash -lc 'set -e; apt-get update >/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fasm gcc libc6-dev python3 make bash ca-certificates >/dev/null'
+  docker commit plojure-fasm-bootstrap "$IMAGE" >/dev/null
+  docker rm -f plojure-fasm-bootstrap >/dev/null
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "${REPO_ROOT}" ]]; then
+  echo "[dotfasm] Run from inside the repo."
+  exit 1
+fi
+
+WORKDIR="$(pwd)"
+if [[ "$WORKDIR" == "$REPO_ROOT" ]]; then
+  CONTAINER_WD="/workspace"
+else
+  CONTAINER_WD="/workspace/${WORKDIR#"$REPO_ROOT"/}"
+fi
+
+MODE="compile"
+ASM=""
+OUT=""
+
+case "${1}" in
+  run)
+    MODE="run"
+    ASM="${2:-}"
+    OUT="${3:-}"
+    ;;
+  shell)
+    ensure_image
+    exec docker run --rm -it --platform linux/amd64 \
+      -v "$REPO_ROOT:/workspace" \
+      -w "$CONTAINER_WD" \
+      "$IMAGE" bash
+    ;;
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+  *)
+    ASM="$1"
+    OUT="${2:-}"
+    ;;
+esac
+
+if [[ -z "$ASM" ]]; then
+  usage
+  exit 1
+fi
+
+if [[ ! -f "$ASM" ]]; then
+  echo "[dotfasm] File not found: $ASM"
+  exit 1
+fi
+
+if [[ -z "$OUT" ]]; then
+  OUT="${ASM%.asm}"
+fi
+
+ensure_image
+
+if [[ "$MODE" == "run" ]]; then
+  CMD="set -e; fasm '$ASM' '$OUT'; chmod +x '$OUT'; ./'$OUT'"
+else
+  CMD="set -e; fasm '$ASM' '$OUT'"
+fi
+
+exec docker run --rm --platform linux/amd64 \
+  -v "$REPO_ROOT:/workspace" \
+  -w "$CONTAINER_WD" \
+  "$IMAGE" \
+  bash -lc "$CMD"

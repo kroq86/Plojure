@@ -9,10 +9,10 @@ typedef struct {
     size_t capacity;
 } Generator_Stack;
 
-// Use the generator_stack from assembly
-Generator_Stack* generator_stack;
+// Use generator_stack defined in assembly.
+extern Generator_Stack* generator_stack;
 
-extern void generator_init(void);
+extern void generator_init(void* stack);
 extern void* generator_next(void* g, void* arg);
 extern void generator_restore_context(void* context);
 extern void generator_restore_context_with_return(void* context, void* ret);
@@ -32,10 +32,8 @@ void python_generator_init() {
     memset(main_gen, 0, sizeof(void*) * 8);
     stack->items[stack->count++] = main_gen;
     
-    // Set the global stack pointer
-    generator_stack = stack;
-    
-    generator_init();
+    // Share stack pointer with assembly runtime.
+    generator_init(stack);
 }
 
 __attribute__((visibility("default")))
