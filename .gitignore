@@ -40,6 +40,8 @@ env/
 
 # Project specific
 *.log
+*.core
+core.*
 .coverage
 htmlcov/
 .pytest_cache/

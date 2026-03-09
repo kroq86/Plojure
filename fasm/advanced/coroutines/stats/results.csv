@@ -1,0 +1,2 @@
+timestamp,language,iterations,total_sec,ops_per_sec,status
+2026-03-09T06:00:11Z,c,50000,3,16666.67,ok

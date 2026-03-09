@@ -52,6 +52,16 @@ public generator_yield
 public generator_switch_context
 public generator_return
 public generator__finish_current
+public bench_coroutine_func
+
+; Benchmark coroutine body implemented in ASM:
+; yields 1, then 2, then returns.
+bench_coroutine_func:
+    mov rdi, 1
+    call generator_yield
+    mov rdi, 2
+    call generator_yield
+    ret
 
 generator_init:
     mov [generator_stack], rdi  ; Save generator_stack pointer from C

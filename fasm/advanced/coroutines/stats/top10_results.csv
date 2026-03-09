@@ -1,0 +1,11 @@
+timestamp,language,status,exit_code,wall_sec,ops_per_sec,notes
+2026-03-08T11:34:07Z,c,ok,0,7,0.14,completed
+2026-03-08T11:34:07Z,cpp,failed,124,46,,timeout
+2026-03-08T11:34:07Z,go,failed,124,45,,timeout
+2026-03-08T11:34:07Z,rust,failed,124,46,,timeout
+2026-03-08T11:34:07Z,python,ok,0,23,0.04,completed
+2026-03-08T11:34:07Z,julia,failed,124,45,,timeout
+2026-03-08T11:34:07Z,haskell,failed,124,46,,timeout
+2026-03-08T11:34:07Z,ruby,failed,125,1,,stub
+2026-03-08T11:34:07Z,lua,failed,125,1,,stub
+2026-03-08T11:34:07Z,zig,failed,125,1,,stub
