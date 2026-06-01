@@ -1,3 +1,4 @@
+import platform
 from ctypes import CDLL, POINTER, c_double, c_int
 from typing import Tuple, List
 from pathlib import Path
@@ -10,11 +11,12 @@ class VectorDatabase:
 
     def load_library(self):
         self.mylib = None
+        suffix = ".dylib" if platform.system() == "Darwin" else ".so"
         library_paths = [
-            Path(__file__).resolve().with_name("mylib.so"),
-            Path(__file__).resolve().with_name("dot_product.so"),
-            Path.cwd() / "mylib.so",
-            Path.cwd() / "dot_product.so",
+            Path(__file__).resolve().with_name(f"mylib{suffix}"),
+            Path(__file__).resolve().with_name(f"dot_product{suffix}"),
+            Path.cwd() / f"mylib{suffix}",
+            Path.cwd() / f"dot_product{suffix}",
         ]
 
         for library_path in library_paths:

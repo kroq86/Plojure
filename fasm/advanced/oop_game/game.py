@@ -7,13 +7,21 @@ updates (health, game over, winner) are done in FASM.
 import ctypes
 import random
 import os
+import platform
 
 # Load shared library (build with ./build.sh first)
-_lib_path = os.path.join(os.path.dirname(__file__), "mylib.so")
+_lib_name = "mylib.dylib" if platform.system() == "Darwin" else "mylib.so"
+_lib_path = os.path.join(os.path.dirname(__file__), _lib_name)
 if not os.path.isfile(_lib_path):
     raise FileNotFoundError(f"Build the project first: cd {os.path.dirname(__file__)} && ./build.sh")
 
-mylib = ctypes.CDLL(_lib_path)
+try:
+    mylib = ctypes.CDLL(_lib_path)
+except OSError as exc:
+    raise SystemExit(
+        f"Could not load {_lib_name}. On Apple Silicon, run this with an "
+        f"x86_64/Rosetta Python because the FASM library is x86_64: {exc}"
+    ) from exc
 
 # void* py_game_state_alloc(void)
 mylib.py_game_state_alloc.argtypes = []

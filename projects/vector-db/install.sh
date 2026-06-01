@@ -80,15 +80,8 @@ compile_asm() {
     
     case "$OS" in
         "Darwin")
-            if [ "$ARCH" = "arm64" ]; then
-                # Apple Silicon
-                fasm dot_product.asm dot_product.o
-                gcc -shared -o dot_product.so dot_product.o
-            else
-                # Intel Mac
-                fasm dot_product.asm dot_product.o
-                gcc -shared -o dot_product.so dot_product.o
-            fi
+            fasm --emit=macho-obj dot_product.asm dot_product.o
+            clang -arch x86_64 -dynamiclib dot_product.o wrapper.c -o dot_product.dylib
             ;;
         "Linux")
             fasm dot_product.asm dot_product.o
@@ -177,4 +170,4 @@ main() {
 }
 
 # Запуск
-main "$@" 
+main "$@"

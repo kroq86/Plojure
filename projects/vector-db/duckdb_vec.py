@@ -1,5 +1,6 @@
 import duckdb
 import numpy as np
+import platform
 from typing import List, Tuple, Optional, Dict, Callable, Literal, Set, Union
 from ctypes import CDLL, POINTER, c_double, c_float, c_int, c_ubyte
 from concurrent.futures import ThreadPoolExecutor
@@ -222,11 +223,12 @@ class DuckDBVectorDatabase:
             self.mylib = None
             return
 
+        suffix = ".dylib" if platform.system() == "Darwin" else ".so"
         library_paths = [
-            Path(__file__).resolve().with_name("dot_product.so"),
-            Path.cwd() / "dot_product.so",
-            Path(__file__).resolve().with_name("mylib.so"),
-            Path.cwd() / "mylib.so",
+            Path(__file__).resolve().with_name(f"dot_product{suffix}"),
+            Path.cwd() / f"dot_product{suffix}",
+            Path(__file__).resolve().with_name(f"mylib{suffix}"),
+            Path.cwd() / f"mylib{suffix}",
         ]
 
         self.mylib = None

@@ -1,5 +1,6 @@
 # GCC
 *.o
+*.dylib
 
 # Python
 __pycache__/
@@ -53,3 +54,8 @@ htmlcov/
 
 # DuckDb
 *.duckdb
+
+# FASM example outputs
+fasm/basic/arg
+fasm/basic/mycat
+fasm/advanced/binary_search/bin_s

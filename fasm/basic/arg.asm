@@ -1,68 +1,57 @@
-format ELF64 executable
-
-include "linux.inc"
-
-buffer_size equ 1024
-buffer rb buffer_size
-
-segment readable executable
+format ELF64 executable 3
 entry main
 
-main: 
- mov r9, [rsp + 16]
- test r9, r9
- jz error
- mov rdi, r9
- call strlen
+include "../core/platform.inc"
 
-open:
- mov rax, 2
- mov rdi, r9 
- mov rsi, 0
- mov rdx, 0
- syscall
- test rax, rax
- js error
- mov r9, rax
- 
-syscall3 SYS_read, r9, buffer, buffer_size 
-syscall2 SYS_write,1, buffer
- 
-close:
- mov rax, 3
- mov rdi, r9
- syscall 
- 
+BUFFER_SIZE equ 1024
 
-error: 
- exit EXIT_FAILURE 
+segment readable executable
 
-exit EXIT_SUCCESS
+main:
+	cmp qword [rsp], 2
+	jb usage_error
 
-strlen: 
- push rcx
- xor rcx, rcx
+	mov r12, [rsp + 16]
+	open_file r12, O_RDONLY, 0
+	jump_if_syscall_error open_error
+	mov r12, rax
 
- .strlen_loop: 
- mov byte al, [rdi + rcx]
- cmp al, 0
- je .strlen_cleanup
- inc rcx
- jmp .strlen_loop
+.read_loop:
+	read_file r12, buffer, BUFFER_SIZE
+	jump_if_syscall_error read_error
+	test rax, rax
+	jz .done
+	mov r15, rax
+	write_file STDOUT, buffer, r15
+	jump_if_syscall_error write_error
+	jmp .read_loop
 
+.done:
+	close_file r12
+	exit EXIT_SUCCESS
 
- .strlen_cleanup: 
- mov rax, rcx
- pop rcx
- ret
+usage_error:
+	write_file STDERR, usage_msg, usage_msg_len
+	exit EXIT_FAILURE
 
+open_error:
+	write_file STDERR, open_msg, open_msg_len
+	exit EXIT_FAILURE
 
-segment readable writable
+read_error:
+	write_file STDERR, read_msg, read_msg_len
+	exit EXIT_FAILURE
 
-struc string [data] {
- common
- . db data
- .size = $ - .
-}
+write_error:
+	exit EXIT_FAILURE
 
-usage string "[usage]: ./main [arg1]", 0xA, 0x0
+segment readable writeable
+
+buffer rb BUFFER_SIZE
+
+usage_msg db "usage: arg <file>", 10
+usage_msg_len = $ - usage_msg
+open_msg db "failed to open file", 10
+open_msg_len = $ - open_msg
+read_msg db "failed to read file", 10
+read_msg_len = $ - read_msg
